@@ -138,6 +138,63 @@ Each IdP has specific clients configured in the `myrealm` realm:
 5. Replace the `Authorization` header with the new token
 6. Forward the request to the backend application
 
+### Traffic Flow — Where the Proxy Sits
+
+The proxy sits **in front of the backend application**, not in front of the identity providers. The calling system always talks directly to its own IdP to acquire a token — the proxy is never in that path.
+
+#### Example: System A migrated to RHBK, System B still on RH-SSO
+
+```
+                        ┌──────────────┐
+                        │   RH-SSO     │
+                        │   (IdP)      │
+                        └──────┬───────┘
+                               │
+                    ① Direct   │  Token response
+                    auth call  │  (RH-SSO token)
+                               │
+┌───────────┐                  │         ┌─────────┐        ┌───────────┐
+│  System B │──────────────────┘         │ Migrated │───────►│ System A  │
+│ (on RHSSO)│                            │  Proxy   │        │ (backend) │
+│           │──── ② API call ───────────►│          │        │ validates │
+│           │     (with RH-SSO token)    │ exchanges│        │ RHBK      │
+│           │                            │ to RHBK  │        │ tokens    │
+│           │◄─── ④ Response ────────────│ token    │◄── ③ ──│           │
+└───────────┘                            └──────────┘        └───────────┘
+```
+
+1. **System B authenticates directly against RH-SSO** — gets an RH-SSO token. The proxy is not involved.
+2. **System B calls System A's API** with the RH-SSO token. Networking is configured so this request hits the proxy (via a Kubernetes Service, Route, or ExternalName).
+3. **The proxy sees the RH-SSO token**, detects the issuer mismatch (`iss` ≠ RHBK), exchanges it for a RHBK token, and forwards the request to System A.
+4. **System A responds** to the proxy, which passes the response back to System B unchanged. System B never knows the proxy exists.
+
+#### Reverse Direction: System C on RHBK, System D still on RH-SSO
+
+```
+                        ┌──────────────┐
+                        │    RHBK      │
+                        │   (IdP)      │
+                        └──────┬───────┘
+                               │
+                    ① Direct   │  Token response
+                    auth call  │  (RHBK token)
+                               │
+┌───────────┐                  │         ┌─────────┐        ┌───────────┐
+│  System C │──────────────────┘         │  Legacy  │───────►│ System D  │
+│ (on RHBK) │                            │  Proxy   │        │ (backend) │
+│           │──── ② API call ───────────►│          │        │ validates │
+│           │     (with RHBK token)      │ exchanges│        │ RH-SSO   │
+│           │                            │ to RHSSO │        │ tokens    │
+│           │◄─── ④ Response ────────────│ token    │◄── ③ ──│           │
+└───────────┘                            └──────────┘        └───────────┘
+```
+
+The pattern is identical — only the direction is reversed. The **legacy proxy** exchanges RHBK tokens into RH-SSO tokens for backends that haven't migrated yet.
+
+#### Key Point: The Proxy is a Reverse Proxy, Not a Redirect
+
+The proxy does **not** send an HTTP redirect (302) to the caller. It holds the caller's connection open, makes a second HTTP call to the real backend (the `TARGET_URL`), and streams the backend's response back to the caller. The caller is completely unaware that a proxy was involved — it looks like a direct call to the backend.
+
 ---
 
 ## 4. Prerequisites
