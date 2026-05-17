@@ -1,0 +1,53 @@
+##############################################################################
+# Token Exchange Proxy — Configuration
+#
+# Deploy ONE instance per service that needs cross-domain token support.
+# Both directions use the Token Exchange grant (RFC 8693).
+#
+#   (A) "legacy" proxy — protects a service that validates against RH-SSO.
+#       Exchanges incoming RHBK tokens → RH-SSO tokens.
+#
+#   (B) "migrated" proxy — protects a service that validates against RHBK.
+#       Exchanges incoming RH-SSO tokens → RHBK tokens.
+#
+# TOKEN_ENDPOINT uses in-cluster service URLs for reliability and to
+# avoid external DNS/TLS dependencies.
+##############################################################################
+
+# ─── A: Protect a legacy service (RH-SSO domain) ─────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: token-proxy-legacy-config
+  namespace: sso-gateway
+  labels:
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: token-exchange-proxy
+data:
+  TARGET_URL: "http://echo-legacy.sso-gateway.svc.cluster.local:8080"
+  EXPECTED_ISSUER: "https://keycloak-rhsso.apps.cluster-nf2q4.dynamic2.redhatworkshops.io/auth/realms/myrealm"
+  TOKEN_ENDPOINT: "https://keycloak.rhsso.svc.cluster.local:8443/auth/realms/myrealm/protocol/openid-connect/token"
+  GRANT_TYPE: "token-exchange"
+  IDP_ALIAS: "rhbk"
+  VERIFY_UPSTREAM_TLS: "false"
+  LISTEN_PORT: "8080"
+
+# ─── B: Protect a migrated service (RHBK domain) ─────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: token-proxy-migrated-config
+  namespace: sso-gateway
+  labels:
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: token-exchange-proxy
+data:
+  TARGET_URL: "http://echo-migrated.sso-gateway.svc.cluster.local:8080"
+  EXPECTED_ISSUER: "https://rhbk-rhbk.apps.cluster-nf2q4.dynamic2.redhatworkshops.io/realms/myrealm"
+  TOKEN_ENDPOINT: "https://rhbk-service.rhbk.svc.cluster.local:8443/realms/myrealm/protocol/openid-connect/token"
+  GRANT_TYPE: "token-exchange"
+  IDP_ALIAS: "rhsso"
+  VERIFY_UPSTREAM_TLS: "false"
+  LISTEN_PORT: "8080"

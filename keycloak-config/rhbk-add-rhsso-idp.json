@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "Partial realm import for RHBK 26.4.",
+    "Adds the legacy RH-SSO 7.6.5 cluster as a trusted OIDC Identity Provider",
+    "and creates a dedicated client for the JWT Authorization Grant (RFC 7523).",
+    "",
+    "NOTE the URL difference: RH-SSO 7.6 uses /auth/realms/..., RHBK 26+ uses /realms/...",
+    "",
+    "Replace ALL placeholders marked with < > before importing."
+  ],
+
+  "identityProviders": [
+    {
+      "alias": "rhsso",
+      "displayName": "RH-SSO 7.6.5 (Legacy Cluster)",
+      "providerId": "oidc",
+      "enabled": true,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "authorizationUrl": "https://rhsso.apps.cluster.domain.com/auth/realms/<REALM_NAME>/protocol/openid-connect/auth",
+        "tokenUrl": "https://rhsso.apps.cluster.domain.com/auth/realms/<REALM_NAME>/protocol/openid-connect/token",
+        "jwksUrl": "https://rhsso.apps.cluster.domain.com/auth/realms/<REALM_NAME>/protocol/openid-connect/certs",
+        "logoutUrl": "https://rhsso.apps.cluster.domain.com/auth/realms/<REALM_NAME>/protocol/openid-connect/logout",
+        "userInfoUrl": "https://rhsso.apps.cluster.domain.com/auth/realms/<REALM_NAME>/protocol/openid-connect/userinfo",
+        "issuer": "https://rhsso.apps.cluster.domain.com/auth/realms/<REALM_NAME>",
+        "clientId": "<RHSSO_BROKER_CLIENT_ID>",
+        "clientSecret": "<RHSSO_BROKER_CLIENT_SECRET>",
+        "clientAuthMethod": "client_secret_post",
+        "defaultScope": "openid",
+        "validateSignature": "true",
+        "useJwksUrl": "true",
+        "syncMode": "IMPORT",
+        "backchannelSupported": "false"
+      }
+    }
+  ],
+
+  "clients": [
+    {
+      "_comment": "Dedicated client for the Token Exchange Proxy to perform JWT Authorization Grants",
+      "clientId": "token-exchange-client",
+      "name": "Token Exchange Service Client",
+      "description": "Used by the Token Exchange Proxy to swap RH-SSO tokens for native RHBK tokens via JWT Authorization Grant",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "<GENERATE_A_STRONG_SECRET>",
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "attributes": {
+        "jwt.authorization.grant.allowed.idps": "rhsso"
+      }
+    }
+  ],
+
+  "_setup_notes": {
+    "step_1": "Import via Admin Console -> Realm Settings -> Action -> Partial Import, or use kcadm.sh",
+    "step_2": "After import, navigate to: Clients -> token-exchange-client -> Settings",
+    "step_3": "Scroll to 'Capability config' and enable 'JWT Authorization Grant'",
+    "step_4": "In 'Allowed Identity Providers for JWT Authorization Grant', select 'rhsso'",
+    "step_5": "Save. Verify: POST to token endpoint with grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer and an RH-SSO assertion should return an RHBK token",
+    "CVE_WARNING": "CVE-2026-1486: RHBK 26.4 does not verify if the IdP is enabled before issuing tokens in the jwt-authorization-grant flow. Implement strict key rotation policies until patched."
+  }
+}

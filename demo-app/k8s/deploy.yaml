@@ -1,0 +1,147 @@
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: sso-migration-demo
+  namespace: sso-gateway
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: sso-migration-demo
+  namespace: sso-gateway
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: sso-migration-demo:latest
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  triggers: []
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sso-migration-demo
+  namespace: sso-gateway
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sso-migration-demo-reader
+rules:
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sso-migration-demo-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sso-migration-demo-reader
+subjects:
+  - kind: ServiceAccount
+    name: sso-migration-demo
+    namespace: sso-gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sso-migration-demo
+  namespace: sso-gateway
+  labels:
+    app: sso-migration-demo
+    app.kubernetes.io/part-of: sso-migration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sso-migration-demo
+  template:
+    metadata:
+      labels:
+        app: sso-migration-demo
+        app.kubernetes.io/part-of: sso-migration
+    spec:
+      serviceAccountName: sso-migration-demo
+      containers:
+        - name: demo
+          image: image-registry.openshift-image-registry.svc:5000/sso-gateway/sso-migration-demo:latest
+          ports:
+            - containerPort: 8080
+          env:
+            # URLs auto-discovered from OCP Routes and Services if not set.
+            # Override these only if your cluster uses non-standard names.
+            #- name: RHSSO_EXTERNAL_URL
+            #  value: "https://<rhsso-route-host>"
+            #- name: RHBK_EXTERNAL_URL
+            #  value: "https://<rhbk-route-host>"
+            - name: REALM
+              value: "myrealm"
+            - name: CLIENT_ID
+              value: "token-exchange-client"
+            - name: CLIENT_SECRET
+              value: "token-exchange-secret-12345"
+            - name: TEST_USER
+              value: "testuser"
+            - name: TEST_PASS
+              value: "testpass"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sso-migration-demo
+  namespace: sso-gateway
+spec:
+  selector:
+    app: sso-migration-demo
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: sso-migration-demo
+  namespace: sso-gateway
+spec:
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: sso-migration-demo
+    weight: 100
+  port:
+    targetPort: 8080

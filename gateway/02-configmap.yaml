@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-nginx-config
+  namespace: sso-gateway
+  labels:
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: gateway
+data:
+  nginx.conf: |
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid       /tmp/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        log_format main '$remote_addr - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent" '
+                        'upstream=$upstream_addr';
+
+        access_log /var/log/nginx/access.log main;
+
+        sendfile        on;
+        keepalive_timeout 65;
+
+        # --------------- Upstream: legacy RH-SSO (OpenShift Service) --
+        # Points to the RH-SSO Kubernetes Service inside the cluster.
+        # Replace namespace and service name to match your RH-SSO deployment.
+        upstream rhsso_backend {
+            server keycloak.rhsso.svc.cluster.local:8443;
+        }
+
+        # --------------- Upstream: new RHBK (OpenShift Service) ------
+        # Points to the RHBK Kubernetes Service inside the cluster.
+        upstream rhbk_backend {
+            server rhbk-service.rhbk.svc.cluster.local:8443;
+        }
+
+        # ======================== RH-SSO vhost ========================
+        server {
+            listen 8443 ssl;
+            server_name keycloak-rhsso.apps.cluster-nf2q4.dynamic2.redhatworkshops.io;
+
+            ssl_certificate     /etc/nginx/tls/rhsso/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/rhsso/tls.key;
+            ssl_protocols       TLSv1.2 TLSv1.3;
+            ssl_ciphers         HIGH:!aNULL:!MD5;
+
+            location / {
+                proxy_pass         https://rhsso_backend;
+                proxy_ssl_verify   off;
+                proxy_set_header   Host              $host;
+                proxy_set_header   X-Real-IP         $remote_addr;
+                proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                proxy_set_header   X-Forwarded-Proto $scheme;
+                proxy_set_header   X-Forwarded-Host  $host;
+                proxy_set_header   X-Forwarded-Port  $server_port;
+                proxy_buffer_size        128k;
+                proxy_buffers            4 256k;
+                proxy_busy_buffers_size  256k;
+            }
+
+            location /health {
+                access_log off;
+                return 200 'OK';
+                add_header Content-Type text/plain;
+            }
+        }
+
+        # ======================== RHBK vhost ==========================
+        server {
+            listen 8443 ssl;
+            server_name rhbk-rhbk.apps.cluster-nf2q4.dynamic2.redhatworkshops.io;
+
+            ssl_certificate     /etc/nginx/tls/rhbk/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/rhbk/tls.key;
+            ssl_protocols       TLSv1.2 TLSv1.3;
+            ssl_ciphers         HIGH:!aNULL:!MD5;
+
+            location / {
+                proxy_pass         https://rhbk_backend;
+                proxy_ssl_verify   off;
+                proxy_set_header   Host              $host;
+                proxy_set_header   X-Real-IP         $remote_addr;
+                proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                proxy_set_header   X-Forwarded-Proto $scheme;
+                proxy_set_header   X-Forwarded-Host  $host;
+                proxy_set_header   X-Forwarded-Port  $server_port;
+                proxy_buffer_size        128k;
+                proxy_buffers            4 256k;
+                proxy_busy_buffers_size  256k;
+            }
+
+            location /health {
+                access_log off;
+                return 200 'OK';
+                add_header Content-Type text/plain;
+            }
+        }
+
+        # =================== Default (catch-all) =====================
+        server {
+            listen 8443 ssl default_server;
+            server_name _;
+
+            ssl_certificate     /etc/nginx/tls/rhsso/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/rhsso/tls.key;
+
+            return 444;
+        }
+    }

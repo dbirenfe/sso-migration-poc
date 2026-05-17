@@ -1,0 +1,110 @@
+##############################################################################
+# Example: Proxy deployment protecting a LEGACY service (RH-SSO domain).
+# Duplicate and adapt for each service that needs cross-domain protection.
+##############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: token-proxy-legacy
+  namespace: sso-gateway
+  labels:
+    app: token-proxy-legacy
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: token-exchange-proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: token-proxy-legacy
+  template:
+    metadata:
+      labels:
+        app: token-proxy-legacy
+        app.kubernetes.io/part-of: sso-migration
+    spec:
+      containers:
+        - name: proxy
+          image: image-registry.openshift-image-registry.svc:5000/sso-gateway/token-exchange-proxy:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: token-proxy-legacy-config
+            - secretRef:
+                name: token-proxy-legacy-credentials
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      restartPolicy: Always
+---
+##############################################################################
+# Example: Proxy deployment protecting a MIGRATED service (RHBK domain).
+##############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: token-proxy-migrated
+  namespace: sso-gateway
+  labels:
+    app: token-proxy-migrated
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: token-exchange-proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: token-proxy-migrated
+  template:
+    metadata:
+      labels:
+        app: token-proxy-migrated
+        app.kubernetes.io/part-of: sso-migration
+    spec:
+      containers:
+        - name: proxy
+          image: image-registry.openshift-image-registry.svc:5000/sso-gateway/token-exchange-proxy:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: token-proxy-migrated-config
+            - secretRef:
+                name: token-proxy-migrated-credentials
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      restartPolicy: Always

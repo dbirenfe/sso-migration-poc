@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSO Migration — Interactive Demo</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #161922;
+  --surface2: #1c1f2e;
+  --border: #2a2d3e;
+  --text: #e1e4ed;
+  --text2: #8b8fa3;
+  --accent: #4f8ff7;
+  --accent2: #3b6fc4;
+  --green: #34c759;
+  --red: #ff453a;
+  --orange: #ff9f0a;
+  --yellow: #ffd60a;
+  --purple: #bf5af2;
+  --rhsso-color: #ee0000;
+  --rhbk-color: #4f8ff7;
+  --radius: 8px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.5; }
+a { color: var(--accent); text-decoration: none; }
+
+/* Layout */
+.app { max-width: 1400px; margin: 0 auto; padding: 20px; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+header h1 { font-size: 20px; font-weight: 600; }
+header h1 span { color: var(--text2); font-weight: 400; }
+.status-bar { display: flex; gap: 12px; align-items: center; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status-dot.ok { background: var(--green); }
+.status-dot.err { background: var(--red); }
+.status-dot.loading { background: var(--orange); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.4; } }
+.status-label { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 4px; }
+
+/* Tabs */
+.tabs { display: flex; gap: 2px; margin-bottom: 24px; background: var(--surface); border-radius: var(--radius); padding: 3px; }
+.tab { padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; color: var(--text2); border: none; background: none; font-family: var(--font); transition: all 0.15s; }
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--surface2); color: var(--text); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Architecture Diagram */
+.arch-container { display: flex; gap: 24px; flex-wrap: wrap; }
+.arch-svg-wrap { flex: 1; min-width: 700px; }
+.arch-legend { width: 280px; }
+.arch-svg-wrap svg { width: 100%; height: auto; }
+
+/* Cards */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.card-header { padding: 12px 16px; font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+.card-body { padding: 16px; }
+.card + .card { margin-top: 12px; }
+
+/* Scenario Grid */
+.scenario-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.scenario-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; cursor: pointer; transition: border-color 0.15s, background 0.15s; position: relative; }
+.scenario-card:hover { border-color: var(--accent); background: var(--surface2); }
+.scenario-card.running { border-color: var(--orange); }
+.scenario-card.pass { border-color: var(--green); }
+.scenario-card.fail { border-color: var(--red); }
+.scenario-difficulty { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text2); margin-bottom: 4px; }
+.scenario-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.scenario-desc { font-size: 12px; color: var(--text2); line-height: 1.5; }
+.scenario-badge { position: absolute; top: 12px; right: 12px; font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.scenario-badge.pass { background: rgba(52,199,89,0.15); color: var(--green); }
+.scenario-badge.fail { background: rgba(255,69,58,0.15); color: var(--red); }
+.scenario-badge.running { background: rgba(255,159,10,0.15); color: var(--orange); }
+
+/* Results Panel */
+#results-panel { margin-top: 24px; }
+.step-list { display: flex; flex-direction: column; gap: 8px; }
+.step { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.step-header { padding: 10px 16px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.step-header:hover { background: var(--surface2); }
+.step-icon { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+.step-icon.pass { background: rgba(52,199,89,0.15); color: var(--green); }
+.step-icon.fail { background: rgba(255,69,58,0.15); color: var(--red); }
+.step-icon.info { background: rgba(79,143,247,0.15); color: var(--accent); }
+.step-name { font-size: 13px; font-weight: 500; flex: 1; }
+.step-time { font-size: 11px; color: var(--text2); font-family: var(--mono); }
+.step-detail { padding: 0 16px 16px 48px; display: none; }
+.step.expanded .step-detail { display: block; }
+.step-desc { font-size: 12px; color: var(--text2); margin-bottom: 10px; line-height: 1.6; }
+
+/* Code/Command blocks */
+.cmd-block { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; font-family: var(--mono); font-size: 11px; line-height: 1.6; overflow-x: auto; white-space: pre-wrap; word-break: break-all; position: relative; color: var(--text2); }
+.cmd-block .copy-btn { position: absolute; top: 6px; right: 6px; background: var(--surface2); border: 1px solid var(--border); color: var(--text2); font-size: 10px; padding: 2px 8px; border-radius: 4px; cursor: pointer; }
+.cmd-block .copy-btn:hover { color: var(--text); }
+
+/* Token display */
+.token-display { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-top: 8px; }
+.token-claims { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 11px; }
+.token-claims dt { color: var(--text2); font-family: var(--mono); }
+.token-claims dd { color: var(--text); word-break: break-all; }
+
+/* Error / Analysis */
+.failure-box { background: rgba(255,69,58,0.06); border: 1px solid rgba(255,69,58,0.2); border-radius: 6px; padding: 12px; margin-top: 8px; }
+.failure-box h4 { font-size: 12px; color: var(--red); margin-bottom: 6px; }
+.failure-box p { font-size: 12px; color: var(--text2); margin-bottom: 4px; }
+.failure-box ul { font-size: 12px; color: var(--text); padding-left: 18px; }
+.failure-box li { margin-bottom: 3px; }
+
+/* Flow Animation */
+.flow-container { margin: 16px 0; }
+.flow-svg { width: 100%; height: auto; }
+
+/* ── Component Flow Diagram ── */
+.flow-diagram {
+  display: flex;
+  align-items: center;
+  padding: 28px 20px 20px;
+  margin: 0 0 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+.flow-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 2px solid var(--border);
+  background: var(--surface);
+  min-width: 74px;
+  max-width: 130px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+  transition: all 0.3s;
+}
+.flow-node.reached { border-color: var(--green); background: rgba(52,199,89,0.05); }
+.flow-node.fail-src { border-color: var(--orange); background: rgba(255,159,10,0.07); }
+.flow-node.fail-dst { border-color: var(--red); background: rgba(255,69,58,0.07); box-shadow: 0 0 14px rgba(255,69,58,0.18); }
+.flow-node.pending { opacity: 0.3; }
+.flow-node-icon {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; margin-bottom: 4px;
+  background: var(--surface2); color: var(--text2);
+}
+.flow-node.reached .flow-node-icon { background: rgba(52,199,89,0.15); color: var(--green); }
+.flow-node.fail-src .flow-node-icon { background: rgba(255,159,10,0.15); color: var(--orange); }
+.flow-node.fail-dst .flow-node-icon { background: rgba(255,69,58,0.15); color: var(--red); }
+.flow-node-label { font-size: 10px; font-weight: 600; text-align: center; line-height: 1.3; color: var(--text); }
+.flow-node-type { font-size: 8px; color: var(--text2); margin-top: 1px; }
+
+.flow-connector {
+  display: flex; flex-direction: column; align-items: center;
+  flex-shrink: 0; min-width: 55px; position: relative;
+}
+.flow-connector-line { display: flex; align-items: center; }
+.flow-connector-bar { height: 2px; width: 34px; background: var(--border); }
+.flow-connector-arrow {
+  width: 0; height: 0;
+  border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+  border-left: 7px solid var(--border);
+}
+.flow-connector.pass .flow-connector-bar { background: var(--green); }
+.flow-connector.pass .flow-connector-arrow { border-left-color: var(--green); }
+.flow-connector.fail .flow-connector-bar { background: var(--red); }
+.flow-connector.fail .flow-connector-arrow { border-left-color: var(--red); }
+.flow-connector.pending .flow-connector-bar { background: var(--border); opacity: 0.3; }
+.flow-connector.pending .flow-connector-arrow { border-left-color: var(--border); opacity: 0.3; }
+.flow-connector-label { font-size: 8px; color: var(--text2); margin-top: 5px; text-align: center; white-space: nowrap; }
+.flow-connector.fail .flow-connector-label { color: var(--red); font-weight: 600; }
+
+.flow-fail-tag {
+  position: absolute; top: -20px; left: 50%; transform: translateX(-50%);
+  background: var(--red); color: #fff; font-size: 8px; font-weight: 700;
+  padding: 2px 8px; border-radius: 4px; white-space: nowrap;
+  animation: flow-pulse 2s infinite;
+}
+@keyframes flow-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+/* Button */
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 6px; font-size: 13px; font-family: var(--font); cursor: pointer; border: 1px solid var(--border); background: var(--surface2); color: var(--text); transition: all 0.15s; }
+.btn:hover { background: var(--accent2); border-color: var(--accent); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent2); }
+.btn-group { display: flex; gap: 8px; margin: 12px 0; }
+
+/* Run-All Banner */
+.run-all-bar { display: flex; align-items: center; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 16px; }
+.run-all-stats { display: flex; gap: 16px; font-size: 13px; }
+.run-all-stats span { display: flex; align-items: center; gap: 4px; }
+
+/* Legend items */
+.legend-item { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
+.legend-color { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; margin-top: 2px; }
+.legend-text h4 { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+.legend-text p { font-size: 11px; color: var(--text2); }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .arch-container { flex-direction: column; }
+  .arch-legend { width: 100%; }
+  .arch-svg-wrap { min-width: 0; }
+  .scenario-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+<header>
+  <h1>SSO Migration Demo <span>— RH-SSO / RHBK Token Exchange</span></h1>
+  <div class="status-bar">
+    <span class="status-label"><span class="status-dot loading" id="dot-rhsso"></span> RH-SSO</span>
+    <span class="status-label"><span class="status-dot loading" id="dot-rhbk"></span> RHBK</span>
+    <button class="btn" onclick="refreshStatus()">Refresh Status</button>
+  </div>
+</header>
+
+<!-- Tabs -->
+<div class="tabs">
+  <button class="tab active" data-tab="architecture" onclick="switchTab(this)">Architecture</button>
+  <button class="tab" data-tab="scenarios" onclick="switchTab(this)">Test Scenarios</button>
+  <button class="tab" data-tab="commands" onclick="switchTab(this)">Command Reference</button>
+</div>
+
+<!-- ═══ TAB: Architecture ═══ -->
+<div class="tab-panel active" id="tab-architecture">
+  <div class="arch-container">
+    <div class="arch-svg-wrap">
+      <svg viewBox="0 0 780 520" fill="none" xmlns="http://www.w3.org/2000/svg" class="flow-svg" id="arch-diagram">
+        <!-- Background boxes -->
+        <!-- RH-SSO Namespace -->
+        <rect x="20" y="30" width="220" height="200" rx="10" fill="#1c1020" stroke="#ee0000" stroke-width="1.5" stroke-dasharray="6 3" opacity="0.7"/>
+        <text x="130" y="22" fill="#ee0000" font-size="11" font-weight="600" text-anchor="middle" font-family="sans-serif">rhsso namespace</text>
+
+        <!-- RHBK Namespace -->
+        <rect x="540" y="30" width="220" height="200" rx="10" fill="#101828" stroke="#4f8ff7" stroke-width="1.5" stroke-dasharray="6 3" opacity="0.7"/>
+        <text x="650" y="22" fill="#4f8ff7" font-size="11" font-weight="600" text-anchor="middle" font-family="sans-serif">rhbk namespace</text>
+
+        <!-- Gateway Namespace -->
+        <rect x="180" y="300" width="420" height="190" rx="10" fill="#121820" stroke="#2a2d3e" stroke-width="1.5" stroke-dasharray="6 3" opacity="0.7"/>
+        <text x="390" y="292" fill="#8b8fa3" font-size="11" font-weight="600" text-anchor="middle" font-family="sans-serif">sso-gateway namespace</text>
+
+        <!-- RH-SSO Box -->
+        <rect x="50" y="60" width="160" height="70" rx="8" fill="#2a1015" stroke="#ee0000" stroke-width="1.5"/>
+        <text x="130" y="88" fill="#ee0000" font-size="13" font-weight="600" text-anchor="middle" font-family="sans-serif">RH-SSO 7.6</text>
+        <text x="130" y="106" fill="#8b8fa3" font-size="10" text-anchor="middle" font-family="sans-serif">Keycloak 18.x</text>
+
+        <!-- RH-SSO DB -->
+        <rect x="70" y="160" width="120" height="48" rx="6" fill="#1c1f2e" stroke="#2a2d3e" stroke-width="1"/>
+        <text x="130" y="181" fill="#8b8fa3" font-size="10" text-anchor="middle" font-family="sans-serif">PostgreSQL</text>
+        <text x="130" y="196" fill="#555" font-size="9" text-anchor="middle" font-family="sans-serif">rhsso-pgsql</text>
+
+        <!-- RHBK Box -->
+        <rect x="570" y="60" width="160" height="70" rx="8" fill="#0f1528" stroke="#4f8ff7" stroke-width="1.5"/>
+        <text x="650" y="88" fill="#4f8ff7" font-size="13" font-weight="600" text-anchor="middle" font-family="sans-serif">RHBK 26.4</text>
+        <text x="650" y="106" fill="#8b8fa3" font-size="10" text-anchor="middle" font-family="sans-serif">Keycloak 26.x</text>
+
+        <!-- RHBK DB -->
+        <rect x="590" y="160" width="120" height="48" rx="6" fill="#1c1f2e" stroke="#2a2d3e" stroke-width="1"/>
+        <text x="650" y="181" fill="#8b8fa3" font-size="10" text-anchor="middle" font-family="sans-serif">PostgreSQL</text>
+        <text x="650" y="196" fill="#555" font-size="9" text-anchor="middle" font-family="sans-serif">rhbk-pgsql</text>
+
+        <!-- Bidirectional trust arrow -->
+        <line x1="210" y1="95" x2="570" y2="95" stroke="#ffd60a" stroke-width="1.5" stroke-dasharray="5 3"/>
+        <polygon points="565,90 575,95 565,100" fill="#ffd60a"/>
+        <polygon points="215,90 205,95 215,100" fill="#ffd60a"/>
+        <text x="390" y="86" fill="#ffd60a" font-size="9" font-weight="500" text-anchor="middle" font-family="sans-serif">Bidirectional Token Exchange (RFC 8693)</text>
+
+        <!-- DB connections -->
+        <line x1="130" y1="130" x2="130" y2="160" stroke="#2a2d3e" stroke-width="1"/>
+        <line x1="650" y1="130" x2="650" y2="160" stroke="#2a2d3e" stroke-width="1"/>
+
+        <!-- Legacy Proxy -->
+        <rect x="210" y="330" width="155" height="60" rx="8" fill="#1c1f2e" stroke="#ee0000" stroke-width="1" stroke-dasharray="4 2"/>
+        <text x="287" y="354" fill="#e1e4ed" font-size="11" font-weight="600" text-anchor="middle" font-family="sans-serif">Legacy Proxy</text>
+        <text x="287" y="370" fill="#8b8fa3" font-size="9" text-anchor="middle" font-family="sans-serif">RHBK tok → RH-SSO tok</text>
+
+        <!-- Migrated Proxy -->
+        <rect x="410" y="330" width="155" height="60" rx="8" fill="#1c1f2e" stroke="#4f8ff7" stroke-width="1" stroke-dasharray="4 2"/>
+        <text x="487" y="354" fill="#e1e4ed" font-size="11" font-weight="600" text-anchor="middle" font-family="sans-serif">Migrated Proxy</text>
+        <text x="487" y="370" fill="#8b8fa3" font-size="9" text-anchor="middle" font-family="sans-serif">RH-SSO tok → RHBK tok</text>
+
+        <!-- App boxes -->
+        <rect x="220" y="420" width="130" height="45" rx="6" fill="#1c1f2e" stroke="#2a2d3e" stroke-width="1"/>
+        <text x="285" y="440" fill="#8b8fa3" font-size="10" text-anchor="middle" font-family="sans-serif">Legacy App</text>
+        <text x="285" y="454" fill="#555" font-size="9" text-anchor="middle" font-family="sans-serif">(validates RH-SSO)</text>
+
+        <rect x="425" y="420" width="130" height="45" rx="6" fill="#1c1f2e" stroke="#2a2d3e" stroke-width="1"/>
+        <text x="490" y="440" fill="#8b8fa3" font-size="10" text-anchor="middle" font-family="sans-serif">Migrated App</text>
+        <text x="490" y="454" fill="#555" font-size="9" text-anchor="middle" font-family="sans-serif">(validates RHBK)</text>
+
+        <!-- Proxy → App arrows -->
+        <line x1="285" y1="390" x2="285" y2="420" stroke="#2a2d3e" stroke-width="1"/>
+        <polygon points="280,415 285,425 290,415" fill="#2a2d3e"/>
+        <line x1="490" y1="390" x2="490" y2="420" stroke="#2a2d3e" stroke-width="1"/>
+        <polygon points="485,415 490,425 495,415" fill="#2a2d3e"/>
+
+        <!-- Proxy → IdP arrows (to the IdP boxes, not the DBs) -->
+        <path d="M 260 330 Q 190 230 145 130" stroke="#ee0000" stroke-width="1" fill="none" stroke-dasharray="3 2" opacity="0.6"/>
+        <text x="170" y="240" fill="#ee0000" font-size="8" opacity="0.6" font-family="sans-serif">exchange</text>
+        <path d="M 510 330 Q 590 230 640 130" stroke="#4f8ff7" stroke-width="1" fill="none" stroke-dasharray="3 2" opacity="0.6"/>
+        <text x="580" y="240" fill="#4f8ff7" font-size="8" opacity="0.6" font-family="sans-serif">exchange</text>
+
+        <!-- External users -->
+        <text x="390" y="510" fill="#8b8fa3" font-size="10" text-anchor="middle" font-family="sans-serif">Users / Client Applications (no code changes required)</text>
+      </svg>
+    </div>
+
+    <div class="arch-legend">
+      <div class="card">
+        <div class="card-header">Architecture Components</div>
+        <div class="card-body">
+          <div class="legend-item">
+            <div class="legend-color" style="background:#ee0000"></div>
+            <div class="legend-text">
+              <h4>RH-SSO 7.6.5</h4>
+              <p>Legacy Identity Provider (Keycloak 18.x on JBoss EAP). Runs in the <code>rhsso</code> namespace. Token exchange enabled as tech-preview feature.</p>
+            </div>
+          </div>
+          <div class="legend-item">
+            <div class="legend-color" style="background:#4f8ff7"></div>
+            <div class="legend-text">
+              <h4>RHBK 26.4</h4>
+              <p>New Identity Provider (Keycloak 26.x on Quarkus). Runs in the <code>rhbk</code> namespace. Fine-grained authorization enabled for token exchange.</p>
+            </div>
+          </div>
+          <div class="legend-item">
+            <div class="legend-color" style="background:#ffd60a"></div>
+            <div class="legend-text">
+              <h4>Token Exchange Trust</h4>
+              <p>Bidirectional IdP trust configured between both Keycloaks. Each has the other registered as an Identity Provider.</p>
+            </div>
+          </div>
+          <div class="legend-item">
+            <div class="legend-color" style="background:#2a2d3e"></div>
+            <div class="legend-text">
+              <h4>Token Exchange Proxy</h4>
+              <p>Transparent reverse proxy. Inspects JWT issuer, performs token exchange if needed, forwards request with correct token. Zero code changes to applications.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="card-header">How It Works</div>
+        <div class="card-body" style="font-size:12px;color:var(--text2);line-height:1.7">
+          <p><strong>1.</strong> App migrated from RH-SSO to RHBK</p>
+          <p><strong>2.</strong> Another system still holds an RH-SSO token</p>
+          <p><strong>3.</strong> It calls the migrated app through the proxy</p>
+          <p><strong>4.</strong> Proxy detects issuer mismatch</p>
+          <p><strong>5.</strong> Proxy exchanges RH-SSO token for RHBK token</p>
+          <p><strong>6.</strong> Proxy forwards request with valid RHBK token</p>
+          <p><strong>7.</strong> App validates token normally — no code changes</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="card-header">Live Cluster Info</div>
+        <div class="card-body" style="font-size:11px;color:var(--text2);line-height:1.8;font-family:var(--mono)">
+          <div>RH-SSO: <span style="color:var(--rhsso-color)">{{ rhsso_external }}</span></div>
+          <div>RHBK: <span style="color:var(--rhbk-color)">{{ rhbk_external }}</span></div>
+          <div>Realm: <span style="color:var(--text)">{{ realm }}</span></div>
+          <div>Client: <span style="color:var(--text)">{{ client_id }}</span></div>
+          <div>Test User: <span style="color:var(--text)">{{ test_user }}</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TAB: Scenarios ═══ -->
+<div class="tab-panel" id="tab-scenarios">
+  <div class="run-all-bar">
+    <div>
+      <button class="btn primary" onclick="runAllScenarios()" id="run-all-btn">Run All Scenarios</button>
+    </div>
+    <div class="run-all-stats" id="run-all-stats">
+      <span>Click "Run All" to test every scenario against the live cluster</span>
+    </div>
+  </div>
+
+  <div class="scenario-grid" id="scenario-grid">
+    <!-- Populated by JS -->
+  </div>
+
+  <div id="results-panel"></div>
+</div>
+
+<!-- ═══ TAB: Commands ═══ -->
+<div class="tab-panel" id="tab-commands">
+  <div class="card">
+    <div class="card-header">Quick Reference — Test Commands</div>
+    <div class="card-body">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:16px">
+        Run these commands from any machine with <code>curl</code> access to the cluster.
+        Replace variables as needed for your environment.
+      </p>
+
+      <h3 style="font-size:13px;font-weight:600;margin:16px 0 8px;color:var(--rhsso-color)">1. Acquire RH-SSO Token</h3>
+      <div class="cmd-block" id="cmd-1">curl -sk -X POST '{{ rhsso_external }}/auth/realms/{{ realm }}/protocol/openid-connect/token' \
+  -d 'client_id={{ client_id }}' \
+  -d 'client_secret=token-exchange-secret-12345' \
+  -d 'username={{ test_user }}' \
+  -d 'password=testpass' \
+  -d 'grant_type=password' \
+  -d 'scope=openid' | python3 -m json.tool<button class="copy-btn" onclick="copyCmd(this)">Copy</button></div>
+
+      <h3 style="font-size:13px;font-weight:600;margin:16px 0 8px;color:var(--rhbk-color)">2. Acquire RHBK Token</h3>
+      <div class="cmd-block" id="cmd-2">curl -sk -X POST '{{ rhbk_external }}/realms/{{ realm }}/protocol/openid-connect/token' \
+  -d 'client_id={{ client_id }}' \
+  -d 'client_secret=token-exchange-secret-12345' \
+  -d 'username={{ test_user }}' \
+  -d 'password=testpass' \
+  -d 'grant_type=password' \
+  -d 'scope=openid' | python3 -m json.tool<button class="copy-btn" onclick="copyCmd(this)">Copy</button></div>
+
+      <h3 style="font-size:13px;font-weight:600;margin:16px 0 8px;color:var(--orange)">3. Exchange RHBK Token → RH-SSO</h3>
+      <div class="cmd-block" id="cmd-3"># First get a RHBK token:
+RHBK_TOKEN=$(curl -sk '{{ rhbk_external }}/realms/{{ realm }}/protocol/openid-connect/token' \
+  -d 'client_id={{ client_id }}' -d 'client_secret=token-exchange-secret-12345' \
+  -d 'username={{ test_user }}' -d 'password=testpass' \
+  -d 'grant_type=password' -d 'scope=openid' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Exchange it at RH-SSO:
+curl -sk -X POST '{{ rhsso_external }}/auth/realms/{{ realm }}/protocol/openid-connect/token' \
+  -d 'client_id={{ client_id }}' \
+  -d 'client_secret=token-exchange-secret-12345' \
+  -d 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+  -d "subject_token=$RHBK_TOKEN" \
+  -d 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+  -d 'subject_issuer=rhbk' | python3 -m json.tool<button class="copy-btn" onclick="copyCmd(this)">Copy</button></div>
+
+      <h3 style="font-size:13px;font-weight:600;margin:16px 0 8px;color:var(--orange)">4. Exchange RH-SSO Token → RHBK</h3>
+      <div class="cmd-block" id="cmd-4"># First get an RH-SSO token:
+RHSSO_TOKEN=$(curl -sk '{{ rhsso_external }}/auth/realms/{{ realm }}/protocol/openid-connect/token' \
+  -d 'client_id={{ client_id }}' -d 'client_secret=token-exchange-secret-12345' \
+  -d 'username={{ test_user }}' -d 'password=testpass' \
+  -d 'grant_type=password' -d 'scope=openid' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Exchange it at RHBK:
+curl -sk -X POST '{{ rhbk_external }}/realms/{{ realm }}/protocol/openid-connect/token' \
+  -d 'client_id={{ client_id }}' \
+  -d 'client_secret=token-exchange-secret-12345' \
+  -d 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+  -d "subject_token=$RHSSO_TOKEN" \
+  -d 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+  -d 'subject_issuer=rhsso' | python3 -m json.tool<button class="copy-btn" onclick="copyCmd(this)">Copy</button></div>
+
+      <h3 style="font-size:13px;font-weight:600;margin:16px 0 8px;color:var(--purple)">5. Decode a JWT Token</h3>
+      <div class="cmd-block" id="cmd-5"># Decode any JWT to see its claims:
+echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool<button class="copy-btn" onclick="copyCmd(this)">Copy</button></div>
+
+      <h3 style="font-size:13px;font-weight:600;margin:16px 0 8px">6. Check Component Status</h3>
+      <div class="cmd-block" id="cmd-6"># RH-SSO health:
+oc -n rhsso get pod keycloak-0 -o jsonpath='{.status.phase}'
+
+# RHBK health:
+oc -n rhbk get pod rhbk-0 -o jsonpath='{.status.phase}'
+
+# Proxy pods:
+oc -n sso-gateway get pods
+
+# Network policies:
+oc -n sso-gateway get networkpolicies<button class="copy-btn" onclick="copyCmd(this)">Copy</button></div>
+    </div>
+  </div>
+</div>
+
+</div><!-- .app -->
+
+<script>
+const SCENARIOS = [
+  {
+    id: 'direct_rhsso',
+    title: 'Direct RH-SSO Authentication',
+    desc: 'User authenticates directly against RH-SSO and receives a token. The simplest flow — no exchange needed.',
+    difficulty: 'Basic',
+    flowNodes: [
+      { label: 'User', type: 'user' },
+      { label: 'RH-SSO', type: 'rhsso', stepIdx: 0, linkLabel: 'Authenticate' },
+    ],
+  },
+  {
+    id: 'direct_rhbk',
+    title: 'Direct RHBK Authentication',
+    desc: 'User authenticates directly against RHBK and receives a token. Same simple flow, other IdP.',
+    difficulty: 'Basic',
+    flowNodes: [
+      { label: 'User', type: 'user' },
+      { label: 'RHBK', type: 'rhbk', stepIdx: 0, linkLabel: 'Authenticate' },
+    ],
+  },
+  {
+    id: 'exchange_rhbk_to_rhsso',
+    title: 'Token Exchange: RHBK → RH-SSO',
+    desc: 'Acquire a RHBK token, then exchange it at RH-SSO for a native RH-SSO token. Tests Direction B.',
+    difficulty: 'Intermediate',
+    flowNodes: [
+      { label: 'User', type: 'user' },
+      { label: 'RHBK', type: 'rhbk', stepIdx: 0, linkLabel: 'Get Token' },
+      { label: 'RH-SSO', type: 'rhsso', stepIdx: 1, linkLabel: 'Exchange' },
+    ],
+  },
+  {
+    id: 'exchange_rhsso_to_rhbk',
+    title: 'Token Exchange: RH-SSO → RHBK',
+    desc: 'Acquire an RH-SSO token, then exchange it at RHBK for a native RHBK token. Tests Direction D — the hardest exchange to configure.',
+    difficulty: 'Intermediate',
+    flowNodes: [
+      { label: 'User', type: 'user' },
+      { label: 'RH-SSO', type: 'rhsso', stepIdx: 0, linkLabel: 'Get Token' },
+      { label: 'RHBK', type: 'rhbk', stepIdx: 1, linkLabel: 'Exchange' },
+    ],
+  },
+  {
+    id: 'proxy_legacy',
+    title: 'Proxy: RHBK Token → Legacy App',
+    desc: 'Send a RHBK token through the Legacy proxy. The proxy transparently exchanges it for an RH-SSO token before forwarding.',
+    difficulty: 'Advanced',
+    flowNodes: [
+      { label: 'User', type: 'user' },
+      { label: 'RHBK', type: 'rhbk', stepIdx: 0, linkLabel: 'Get Token' },
+      { label: 'Legacy Proxy', type: 'proxy', stepIdx: 1, linkLabel: 'Exchange + Forward' },
+    ],
+  },
+  {
+    id: 'proxy_migrated',
+    title: 'Proxy: RH-SSO Token → Migrated App',
+    desc: 'Send an RH-SSO token through the Migrated proxy. The proxy transparently exchanges it for a RHBK token before forwarding.',
+    difficulty: 'Advanced',
+    flowNodes: [
+      { label: 'User', type: 'user' },
+      { label: 'RH-SSO', type: 'rhsso', stepIdx: 0, linkLabel: 'Get Token' },
+      { label: 'Migrated Proxy', type: 'proxy', stepIdx: 1, linkLabel: 'Exchange + Forward' },
+    ],
+  },
+  {
+    id: 'chained_rhsso_via_rhbk',
+    title: 'Chained: RH-SSO → RHBK → RH-SSO',
+    desc: 'Double hop: get an RH-SSO token, exchange it at RHBK, then exchange the RHBK token back at RH-SSO. Simulates a backend calling another backend across IdPs.',
+    difficulty: 'Expert',
+    flowNodes: [
+      { label: 'User', type: 'user' },
+      { label: 'RH-SSO', type: 'rhsso', stepIdx: 0, linkLabel: 'Get Token' },
+      { label: 'RHBK', type: 'rhbk', stepIdx: 1, linkLabel: 'Exchange (hop 1)' },
+      { label: 'RH-SSO', type: 'rhsso', stepIdx: 2, linkLabel: 'Exchange (hop 2)' },
+    ],
+  },
+  {
+    id: 'chained_rhbk_via_rhsso',
+    title: 'Chained: RHBK → RH-SSO → RHBK',
+    desc: 'Double hop in reverse: get a RHBK token, exchange at RH-SSO, then exchange back at RHBK. Simulates the reverse cross-IdP backend chain.',
+    difficulty: 'Expert',
+    flowNodes: [
+      { label: 'User', type: 'user' },
+      { label: 'RHBK', type: 'rhbk', stepIdx: 0, linkLabel: 'Get Token' },
+      { label: 'RH-SSO', type: 'rhsso', stepIdx: 1, linkLabel: 'Exchange (hop 1)' },
+      { label: 'RHBK', type: 'rhbk', stepIdx: 2, linkLabel: 'Exchange (hop 2)' },
+    ],
+  },
+  {
+    id: 'full_migration_flow',
+    title: 'Full Customer Scenario',
+    desc: 'The exact scenario the customer described: System B uses RH-SSO Client A to get a token, calls System A which has migrated to RHBK. The proxy handles it transparently.',
+    difficulty: 'Real-World',
+    flowNodes: [
+      { label: 'System B', type: 'user' },
+      { label: 'RH-SSO', type: 'rhsso', stepIdx: 1, linkLabel: 'Get Token (Client A)' },
+      { label: 'Proxy', type: 'proxy', stepIdx: 2, linkLabel: 'Send RH-SSO Token' },
+      { label: 'RHBK', type: 'rhbk', stepIdx: 3, linkLabel: 'Exchange Token' },
+      { label: 'System A', type: 'app', stepIdx: 4, linkLabel: 'Forward' },
+    ],
+  },
+];
+
+// ─── Init ───────────────────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', () => {
+  renderScenarios();
+  refreshStatus();
+});
+
+function switchTab(el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + el.dataset.tab).classList.add('active');
+}
+
+// ─── Status ─────────────────────────────────────────────────────────
+
+async function refreshStatus() {
+  ['rhsso','rhbk'].forEach(id => {
+    const dot = document.getElementById('dot-' + id);
+    dot.className = 'status-dot loading';
+  });
+  try {
+    const r = await fetch('/api/status');
+    const data = await r.json();
+    for (const [id, info] of Object.entries(data)) {
+      const dot = document.getElementById('dot-' + id);
+      dot.className = 'status-dot ' + (info.healthy ? 'ok' : 'err');
+    }
+  } catch {
+    ['rhsso','rhbk'].forEach(id => {
+      document.getElementById('dot-' + id).className = 'status-dot err';
+    });
+  }
+}
+
+// ─── Scenarios ──────────────────────────────────────────────────────
+
+function renderScenarios() {
+  const grid = document.getElementById('scenario-grid');
+  grid.innerHTML = SCENARIOS.map(s => `
+    <div class="scenario-card" id="sc-${s.id}" onclick="runScenario('${s.id}')">
+      <div class="scenario-difficulty">${s.difficulty}</div>
+      <div class="scenario-title">${s.title}</div>
+      <div class="scenario-desc">${s.desc}</div>
+    </div>
+  `).join('');
+}
+
+async function runScenario(id) {
+  const card = document.getElementById('sc-' + id);
+  card.className = 'scenario-card running';
+  let badge = card.querySelector('.scenario-badge');
+  if (!badge) { badge = document.createElement('div'); badge.className='scenario-badge'; card.appendChild(badge); }
+  badge.className = 'scenario-badge running';
+  badge.textContent = 'Running...';
+
+  try {
+    const r = await fetch('/api/scenario/run', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({scenario: id}),
+    });
+    const data = await r.json();
+
+    card.className = 'scenario-card ' + (data.success ? 'pass' : 'fail');
+    badge.className = 'scenario-badge ' + (data.success ? 'pass' : 'fail');
+    badge.textContent = data.success ? 'PASS' : 'FAIL';
+
+    renderResults(SCENARIOS.find(s=>s.id===id), data);
+  } catch (e) {
+    card.className = 'scenario-card fail';
+    badge.className = 'scenario-badge fail';
+    badge.textContent = 'ERROR';
+    renderResults(SCENARIOS.find(s=>s.id===id), {success:false, steps:[{step:'Network error', description:e.message, success:false}]});
+  }
+}
+
+async function runAllScenarios() {
+  const btn = document.getElementById('run-all-btn');
+  btn.disabled = true;
+  btn.textContent = 'Running...';
+  const stats = document.getElementById('run-all-stats');
+  let pass = 0, fail = 0, total = SCENARIOS.length;
+
+  for (const s of SCENARIOS) {
+    stats.innerHTML = `<span>Running: ${s.title} (${pass+fail+1}/${total})</span>`;
+    await runScenario(s.id);
+    const card = document.getElementById('sc-' + s.id);
+    if (card.classList.contains('pass')) pass++; else fail++;
+  }
+
+  stats.innerHTML = `
+    <span style="color:var(--green)">${pass} Passed</span>
+    <span style="color:${fail?'var(--red)':'var(--text2)'}">${fail} Failed</span>
+    <span style="color:var(--text2)">${total} Total</span>
+  `;
+  btn.disabled = false;
+  btn.textContent = 'Run All Scenarios';
+}
+
+// ─── Results Rendering ──────────────────────────────────────────────
+
+function renderResults(scenario, data) {
+  const panel = document.getElementById('results-panel');
+  panel.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <span>${scenario.title}</span>
+        <span style="color:${data.success ? 'var(--green)' : 'var(--red)'}; font-size:12px">
+          ${data.success ? 'ALL STEPS PASSED' : 'FAILED'}
+        </span>
+      </div>
+      <div class="card-body">
+        ${renderFlowDiagram(scenario, data.steps)}
+        <div class="step-list">
+          ${data.steps.map((step, i) => renderStep(step, i)).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderFlowDiagram(scenario, steps) {
+  const nodes = scenario.flowNodes;
+  if (!nodes || !nodes.length) return '';
+
+  const nodeColors = { rhsso: '#ee0000', rhbk: '#4f8ff7', proxy: '#ffd60a', user: '#8b8fa3', app: '#8b8fa3' };
+  const nodeIcons  = { rhsso: 'SSO', rhbk: 'BK', proxy: 'PX', user: 'U', app: 'A' };
+
+  let failedAtNodeIdx = -1;
+
+  const statuses = nodes.map((node, i) => {
+    if (node.stepIdx === undefined) return 'reached';
+    if (failedAtNodeIdx !== -1) return 'pending';
+    const step = steps[node.stepIdx];
+    if (!step) return 'pending';
+    if (step.success) return 'reached';
+    failedAtNodeIdx = i;
+    return 'fail-dst';
+  });
+
+  if (failedAtNodeIdx > 0) statuses[failedAtNodeIdx - 1] = 'fail-src';
+
+  let failError = '';
+  if (failedAtNodeIdx !== -1) {
+    const fStep = steps[nodes[failedAtNodeIdx].stepIdx];
+    if (fStep) {
+      const err = fStep.error;
+      if (err) {
+        failError = err.error_description || err.error || err.detail || '';
+        if (failError.length > 35) failError = failError.substring(0, 33) + '…';
+      }
+      if (!failError) failError = 'Error';
+    }
+  }
+
+  let html = '<div class="flow-diagram">';
+
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    const st = statuses[i];
+
+    if (i > 0) {
+      let connSt = 'pending';
+      if (st === 'reached' || st === 'fail-src') connSt = 'pass';
+      else if (st === 'fail-dst') connSt = 'fail';
+
+      const errTag = (connSt === 'fail' && failError)
+        ? `<div class="flow-fail-tag">&#10007; ${escapeHtml(failError)}</div>` : '';
+
+      html += `
+        <div class="flow-connector ${connSt}">
+          ${errTag}
+          <div class="flow-connector-line">
+            <div class="flow-connector-bar"></div>
+            <div class="flow-connector-arrow"></div>
+          </div>
+          <div class="flow-connector-label">${node.linkLabel || ''}</div>
+        </div>`;
+    }
+
+    const ic = (st === 'reached' || st === 'fail-src') ? '&#10003;' : (st === 'fail-dst' ? '&#10007;' : '&#8226;');
+    const col = nodeColors[node.type] || '#8b8fa3';
+    const abbr = nodeIcons[node.type] || '?';
+
+    html += `
+      <div class="flow-node ${st}" title="${node.label}">
+        <div class="flow-node-icon">${ic}</div>
+        <div class="flow-node-label">${node.label}</div>
+        <div class="flow-node-type" style="color:${col}">${abbr}</div>
+      </div>`;
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function renderStep(step, idx) {
+  const iconClass = step.info_only ? 'info' : (step.success ? 'pass' : 'fail');
+  const icon = step.info_only ? 'i' : (step.success ? '&#10003;' : '&#10007;');
+  const time = step.elapsed_ms ? `${step.elapsed_ms}ms` : '';
+
+  let detailHtml = '';
+  if (step.description) detailHtml += `<div class="step-desc">${step.description}</div>`;
+  if (step.endpoint) detailHtml += `<div style="font-size:11px;margin-bottom:6px"><span style="color:var(--text2)">Endpoint:</span> <code style="color:var(--accent)">${step.endpoint}</code></div>`;
+  if (step.status_code) detailHtml += `<div style="font-size:11px;margin-bottom:6px"><span style="color:var(--text2)">HTTP:</span> <code>${step.status_code}</code>${step.status_note ? `<span style="color:var(--text2);font-size:10px">${step.status_note}</span>` : ''}</div>`;
+
+  if (step.claims) {
+    detailHtml += `<div style="margin-top:8px"><div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--green)">Resulting Token Claims:</div>`;
+    detailHtml += renderClaims(step.claims);
+    detailHtml += '</div>';
+  }
+  if (step.source_claims) {
+    detailHtml += `<div style="margin-top:8px"><div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--text2)">Source Token Claims:</div>`;
+    detailHtml += renderClaims(step.source_claims);
+    detailHtml += '</div>';
+  }
+
+  if (step.error && !step.info_only) {
+    detailHtml += renderError(step);
+  }
+
+  if (step.curl) {
+    detailHtml += `<div style="margin-top:10px"><div style="font-size:11px;font-weight:500;margin-bottom:4px">Run it yourself:</div>`;
+    detailHtml += `<div class="cmd-block">${escapeHtml(step.curl)}<button class="copy-btn" onclick="copyCmd(this)">Copy</button></div></div>`;
+  }
+
+  return `
+    <div class="step" onclick="this.classList.toggle('expanded')">
+      <div class="step-header">
+        <div class="step-icon ${iconClass}">${icon}</div>
+        <div class="step-name">${step.step}</div>
+        <div class="step-time">${time}</div>
+      </div>
+      <div class="step-detail">${detailHtml}</div>
+    </div>
+  `;
+}
+
+function renderClaims(claims) {
+  const important = ['iss','sub','aud','exp','iat','typ','azp','preferred_username','email','realm_access'];
+  let html = '<div class="token-display"><dl class="token-claims">';
+  for (const key of important) {
+    if (claims[key] !== undefined) {
+      let val = typeof claims[key] === 'object' ? JSON.stringify(claims[key]) : String(claims[key]);
+      if (key === 'exp' || key === 'iat') val += ` (${new Date(claims[key]*1000).toISOString()})`;
+      html += `<dt>${key}</dt><dd>${escapeHtml(val)}</dd>`;
+    }
+  }
+  html += '</dl></div>';
+  return html;
+}
+
+function renderError(step) {
+  let html = '<div class="failure-box">';
+  if (step.failure_analysis) {
+    const a = step.failure_analysis;
+    html += `<h4>Failure Area: ${a.area}</h4>`;
+    html += `<p><strong>Likely cause:</strong> ${a.likely_cause}</p>`;
+    if (a.suggestions && a.suggestions.length) {
+      html += '<ul>';
+      a.suggestions.forEach(s => html += `<li>${s}</li>`);
+      html += '</ul>';
+    }
+  } else if (step.error) {
+    const errText = typeof step.error === 'object' ? JSON.stringify(step.error, null, 2) : String(step.error);
+    html += `<h4>Error Details</h4><div class="cmd-block">${escapeHtml(errText)}</div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+// ─── Utilities ──────────────────────────────────────────────────────
+
+function escapeHtml(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function copyCmd(btn) {
+  const block = btn.parentElement;
+  const text = block.textContent.replace('Copy', '').trim();
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+</script>
+</body>
+</html>

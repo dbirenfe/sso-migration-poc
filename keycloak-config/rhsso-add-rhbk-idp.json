@@ -1,0 +1,73 @@
+{
+  "_comment": [
+    "Partial realm import for RH-SSO 7.6.5.",
+    "Adds the RHBK 26.4 cluster as a trusted OpenID Connect Identity Provider",
+    "and creates a dedicated client for the Token Exchange flow.",
+    "",
+    "IMPORTANT: Before importing, enable the Token Exchange tech-preview feature",
+    "on all RH-SSO nodes by adding to standalone.xml (or standalone-ha.xml):",
+    "  <spi name=\"preview\"><provider name=\"token-exchange\" enabled=\"true\"/></spi>",
+    "Or start with:  -Dkeycloak.profile.feature.token_exchange=enabled",
+    "",
+    "Replace ALL placeholders marked with < > before importing."
+  ],
+
+  "identityProviders": [
+    {
+      "alias": "rhbk",
+      "displayName": "RHBK 26.4 (New Cluster)",
+      "providerId": "oidc",
+      "enabled": true,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "authorizationUrl": "https://rhbk.apps.cluster.domain.com/realms/<REALM_NAME>/protocol/openid-connect/auth",
+        "tokenUrl": "https://rhbk.apps.cluster.domain.com/realms/<REALM_NAME>/protocol/openid-connect/token",
+        "jwksUrl": "https://rhbk.apps.cluster.domain.com/realms/<REALM_NAME>/protocol/openid-connect/certs",
+        "logoutUrl": "https://rhbk.apps.cluster.domain.com/realms/<REALM_NAME>/protocol/openid-connect/logout",
+        "userInfoUrl": "https://rhbk.apps.cluster.domain.com/realms/<REALM_NAME>/protocol/openid-connect/userinfo",
+        "issuer": "https://rhbk.apps.cluster.domain.com/realms/<REALM_NAME>",
+        "clientId": "<RHBK_BROKER_CLIENT_ID>",
+        "clientSecret": "<RHBK_BROKER_CLIENT_SECRET>",
+        "clientAuthMethod": "client_secret_post",
+        "defaultScope": "openid",
+        "validateSignature": "true",
+        "useJwksUrl": "true",
+        "syncMode": "IMPORT",
+        "backchannelSupported": "false"
+      }
+    }
+  ],
+
+  "clients": [
+    {
+      "_comment": "Dedicated client for the Token Exchange Proxy to perform exchanges",
+      "clientId": "token-exchange-client",
+      "name": "Token Exchange Service Client",
+      "description": "Used by the Token Exchange Proxy to swap RHBK tokens for native RH-SSO tokens",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "<GENERATE_A_STRONG_SECRET>",
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "attributes": {
+        "token.exchange.permissions.enabled": "true"
+      }
+    }
+  ],
+
+  "_setup_notes": {
+    "step_1": "Import this file via Admin Console -> Realm Settings -> Partial Import, or use kcadm.sh",
+    "step_2": "After import, go to the 'token-exchange-client' -> Permissions tab",
+    "step_3": "Enable 'Permissions Enabled' toggle",
+    "step_4": "Click on 'token-exchange' permission -> add a policy that allows the 'rhbk' identity provider",
+    "step_5": "Verify: the Token Exchange Proxy should now be able to POST to the token endpoint with grant_type=urn:ietf:params:oauth:grant-type:token-exchange"
+  }
+}

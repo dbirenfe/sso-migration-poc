@@ -1,0 +1,22 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: sso-gateway-rhsso
+  namespace: sso-gateway
+  labels:
+    app: sso-gateway
+    app.kubernetes.io/part-of: sso-migration
+  annotations:
+    haproxy.router.openshift.io/timeout: 60s
+spec:
+  host: keycloak-rhsso.apps.cluster-nf2q4.dynamic2.redhatworkshops.io
+  to:
+    kind: Service
+    name: sso-gateway
+    weight: 100
+  port:
+    targetPort: https
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sso-gateway
+  namespace: sso-gateway
+  labels:
+    app: sso-gateway
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: gateway
+spec:
+  selector:
+    app: sso-gateway
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+      protocol: TCP
+  type: ClusterIP

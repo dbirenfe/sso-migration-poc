@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sso-gateway
+  namespace: sso-gateway
+  labels:
+    app: sso-gateway
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sso-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: sso-gateway
+        app.kubernetes.io/part-of: sso-migration
+    spec:
+      containers:
+        - name: nginx
+          image: registry.access.redhat.com/ubi9/nginx-124:latest
+          ports:
+            - containerPort: 8443
+              protocol: TCP
+              name: https
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: tls-rhsso
+              mountPath: /etc/nginx/tls/rhsso
+              readOnly: true
+            - name: tls-rhbk
+              mountPath: /etc/nginx/tls/rhbk
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: log
+              mountPath: /var/log/nginx
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: gateway-nginx-config
+        - name: tls-rhsso
+          secret:
+            secretName: gateway-tls-rhsso
+        - name: tls-rhbk
+          secret:
+            secretName: gateway-tls-rhbk
+        - name: tmp
+          emptyDir: {}
+        - name: log
+          emptyDir: {}

@@ -1,0 +1,44 @@
+##############################################################################
+# OpenShift BuildConfig — builds the Token Exchange Proxy image from the
+# Dockerfile in the Git repository (or from a local binary upload).
+#
+# Usage (binary build from local source):
+#   oc start-build token-exchange-proxy --from-dir=./token-exchange-proxy
+#
+# This pushes the built image to the internal registry at:
+#   image-registry.openshift-image-registry.svc:5000/sso-gateway/token-exchange-proxy:latest
+##############################################################################
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: token-exchange-proxy
+  namespace: sso-gateway
+  labels:
+    app: token-exchange-proxy
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: token-exchange-proxy
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: token-exchange-proxy:latest
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  triggers: []
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: token-exchange-proxy
+  namespace: sso-gateway
+  labels:
+    app: token-exchange-proxy
+    app.kubernetes.io/part-of: sso-migration
+spec:
+  lookupPolicy:
+    local: true
