@@ -244,7 +244,14 @@ spec:
 
 ### 5.3 Enable Token Exchange (CRITICAL)
 
-RH-SSO 7.6.5 requires two tech-preview features to be enabled. Patch the Keycloak CR:
+RH-SSO 7.6.5 requires two tech-preview features to be enabled:
+
+| Feature | JVM Flag | Purpose |
+|---------|----------|---------|
+| `token_exchange` | `-Dkeycloak.profile.feature.token_exchange=enabled` | Adds the RFC 8693 Token Exchange grant type (`urn:ietf:params:oauth:grant-type:token-exchange`) to the token endpoint. Without it, RH-SSO rejects exchange requests with `unsupported_grant_type`. This is the foundational feature — without it, the entire solution cannot work. |
+| `admin_fine_grained_authz` | `-Dkeycloak.profile.feature.admin_fine_grained_authz=enabled` | Adds a **Permissions** tab to Clients and Identity Providers in the admin console. Token exchange is a privileged operation — Keycloak requires explicit policies that define which clients are allowed to exchange tokens. Without this feature, there is no way to create those policies, and every exchange attempt fails with `"Client not allowed to exchange"`. |
+
+Both are shipped disabled by default in RH-SSO 7.6.5 because Red Hat considers them tech-preview. Patch the Keycloak CR to enable them:
 
 ```bash
 oc -n rhsso patch keycloak rhsso --type=merge -p '{
@@ -374,11 +381,19 @@ spec:
 
 ### 6.3 Enable Required Features (CRITICAL)
 
-RHBK 26.4 requires specific features for token exchange to work. The key insight from our POC:
+RHBK 26.4 (Quarkus-based) requires a specific combination of features enabled and disabled for token exchange to work correctly:
 
-- **`admin-fine-grained-authz:v1`** must be enabled (with the `:v1` version suffix)
-- **`token-exchange-external-internal` (v2) must be DISABLED** — it bypasses fine-grained authorization
-- **`startOptimized: false`** is required because `admin-fine-grained-authz` is a build-time feature
+| Feature | Action | Purpose |
+|---------|--------|---------|
+| `preview` | **Enable** | A feature profile that unlocks all preview features in RHBK 26.x, including the Token Exchange grant type. Without it, the `urn:ietf:params:oauth:grant-type:token-exchange` grant is not recognized and you get `unsupported_grant_type`. |
+| `admin-fine-grained-authz:v1` | **Enable** | Same concept as RH-SSO's `admin_fine_grained_authz` — adds the **Permissions** tab to Clients and Identity Providers so you can define policies controlling who can exchange tokens. The `:v1` version suffix is important: RHBK 26.x introduced versioned features, and `v1` is the stable implementation that works correctly with token exchange policies. Without it, every exchange fails with `"Token not authorized for token exchange"`. |
+| `token-exchange-external-internal` | **Disable** | A newer, simplified token exchange flow in RHBK 26.x. When enabled, it **bypasses fine-grained authorization entirely** — it takes over the exchange flow and skips the IdP validation path we need (where RHBK calls RH-SSO's userinfo/introspection endpoint to validate the foreign token). It doesn't properly respect the `subject_issuer` parameter, and the fine-grained policies we set up get completely ignored. Disabling it forces RHBK to use the `v1` fine-grained authorization path, which correctly validates foreign tokens and checks permissions. |
+
+Additionally, `startOptimized` must be set to `false`:
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `startOptimized` | `false` | RHBK 26.x is built on Quarkus, which has two modes: **optimized** (features decided at build time, fast ~2-3s startup) and **non-optimized** (Quarkus build step runs at startup, slower ~15-30s). `admin-fine-grained-authz` is a **build-time feature** — the default RHBK image was built without it. With `startOptimized: true` and a stock image, the feature silently fails: the Permissions tab shows up but the authorization checks don't execute. Setting `false` forces a rebuild at startup so the feature is actually compiled in. For production, build a custom image with the feature baked in and use `startOptimized: true` (see [Section 11.2](#112-rhbk-custom-image)). |
 
 ```bash
 oc -n rhbk patch keycloak rhbk --type=merge -p '{
@@ -394,8 +409,6 @@ oc -n rhbk patch keycloak rhbk --type=merge -p '{
   }
 }'
 ```
-
-> **For Production:** Build a custom RHBK image with `admin-fine-grained-authz` baked in at build time, then use `startOptimized: true` for faster startup. See [Section 11.2](#112-rhbk-custom-image).
 
 ### 6.4 Create a Matching Realm
 
@@ -1073,6 +1086,19 @@ Similarly, the RH-SSO certificate is stored in a ConfigMap (`rhsso-ca-cert`) and
 ---
 
 ## 13. Summary of Key Configuration
+
+### Feature Flags Reference
+
+Every feature flag is required. Removing any one breaks a different part of the exchange chain.
+
+| Feature | IdP | Enabled/Disabled | Why It's Needed |
+|---------|-----|-----------------|-----------------|
+| `token_exchange` | RH-SSO | **Enabled** | Adds the RFC 8693 token exchange grant type to the token endpoint |
+| `admin_fine_grained_authz` | RH-SSO | **Enabled** | Adds the Permissions tab so you can authorize which clients may exchange tokens |
+| `preview` | RHBK | **Enabled** | Unlocks preview features including the token exchange grant type |
+| `admin-fine-grained-authz:v1` | RHBK | **Enabled** | Adds the Permissions tab (`:v1` is the version that works correctly with exchange) |
+| `token-exchange-external-internal` | RHBK | **Disabled** | Bypasses fine-grained auth and breaks the IdP validation flow we need |
+| `startOptimized` | RHBK | **`false`** | Required so `admin-fine-grained-authz` is compiled in at startup (build-time feature) |
 
 ### RH-SSO Configuration Checklist
 
