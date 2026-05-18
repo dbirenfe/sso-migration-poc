@@ -21,8 +21,9 @@
 9. [Phase 5: Network Policies](#9-phase-5-network-policies)
 10. [Phase 6: Testing & Validation](#10-phase-6-testing--validation)
 11. [Production Considerations](#11-production-considerations)
-12. [Troubleshooting Guide](#12-troubleshooting-guide)
-13. [Summary of Key Configuration](#13-summary-of-key-configuration)
+12. [Frequently Asked Questions](#12-frequently-asked-questions)
+13. [Troubleshooting Guide](#13-troubleshooting-guide)
+14. [Summary of Key Configuration](#14-summary-of-key-configuration)
 
 ---
 
@@ -315,7 +316,17 @@ curl -sk -X POST "https://${RHSSO_URL}/auth/admin/realms/myrealm/clients" \
 
 ### 5.6 Add Audience Mapper to the Client
 
-**Required on BOTH RH-SSO and RHBK.** Tokens must include `token-exchange-client` in the `aud` claim so the other IdP can validate them during exchange. Without this, chained (double-hop) exchanges fail with `invalid_token`.
+**Required on BOTH RH-SSO and RHBK.** This mapper adds `"token-exchange-client"` to the `aud` (audience) claim of every access token the client issues.
+
+**Why this is needed:** Consider a chained double-hop exchange (RH-SSO → RHBK → RH-SSO):
+
+1. Start with an RH-SSO token (from a user login)
+2. Exchange it at RHBK → RHBK issues a **new** token from its `token-exchange-client`
+3. Take that RHBK-issued token and exchange it **back** at RH-SSO
+
+At step 3, RH-SSO validates the incoming RHBK token and checks its `aud` claim. Without the mapper, the token has `"aud": ["account"]` (the default). RH-SSO rejects it because the audience doesn't include `token-exchange-client` — the client that's performing the exchange. With the mapper, the token has `"aud": ["account", "token-exchange-client"]`, and the validation passes.
+
+For simple one-hop exchanges (direct A→B), the audience mapper isn't strictly required because the source token comes from a user login and follows a different validation path. But for consistency and to support chained scenarios, it must be on **both** IdPs.
 
 ```bash
 # Get the client UUID
@@ -1017,7 +1028,126 @@ Similarly, the RH-SSO certificate is stored in a ConfigMap (`rhsso-ca-cert`) and
 
 ---
 
-## 12. Troubleshooting Guide
+## 12. Frequently Asked Questions
+
+### Security
+
+#### "The proxy doesn't verify the JWT signature — isn't that a security risk?"
+
+No. The proxy only decodes the JWT to read the `iss` (issuer) claim — it does not validate the cryptographic signature. This is intentional:
+
+- The proxy is **not a security boundary**. It does not make access control decisions.
+- The **target IdP** validates the token cryptographically during the exchange. It verifies the signature via JWKS, calls the source IdP's userinfo/introspection endpoint, and checks fine-grained authorization policies.
+- The **backend application** validates the exchanged token (signature, expiry, audience, etc.).
+- If an attacker sends a forged JWT, the exchange call to the IdP fails — a forged token cannot pass IdP-level cryptographic validation.
+- Adding signature verification at the proxy would require distributing and rotating signing keys to every proxy instance — significant operational complexity for no real security gain, since the IdP already does this.
+
+#### "What if the `token-exchange-client` secret is compromised?"
+
+An attacker with the client secret could exchange any valid token from one IdP to the other. This is the same risk as any OAuth client secret compromise. Mitigations:
+
+- Rotate secrets periodically
+- Use HashiCorp Vault, External Secrets Operator, or Sealed Secrets instead of plaintext Kubernetes secrets
+- Restrict network access to the proxy pods via Network Policies so only authorized namespaces can reach them
+- Monitor exchange logs for unusual patterns (high volume, unknown source IPs)
+
+#### "Is `token_exchange` supported by Red Hat? It's marked as tech-preview."
+
+In RH-SSO 7.6.5, token exchange is tech-preview. In RHBK 26.x, the `preview` profile is more mature but not GA for all features. For Red Hat support:
+
+- Open a support case and discuss the use case — many customers run tech-preview features in production with Red Hat's awareness
+- The alternative (no proxy, no exchange) requires **all applications to migrate simultaneously** — this is usually a bigger risk than using a well-tested tech-preview feature with a clear rollback path
+
+#### "The proxy has `VERIFY_UPSTREAM_TLS: false` — is that safe?"
+
+No, this is POC-only. In production:
+
+1. Mount the IdP CA certificate into the proxy pod as a volume
+2. Set `VERIFY_UPSTREAM_TLS: "true"`
+3. See Section 11.1 for the full TLS production setup
+
+### Token Behavior
+
+#### "The exchanged token comes from `token-exchange-client`, not the original client. Will our apps accept it?"
+
+After the exchange, the token's `azp` (authorized party) is `token-exchange-client`, not the original application client (e.g., `client_A`). If the backend application checks `azp` or `aud` strictly, it may reject the exchanged token. Solutions:
+
+- **Option A:** Add an audience mapper on `token-exchange-client` to include the application's client ID (e.g., `client_A`) in the `aud` claim of exchanged tokens
+- **Option B:** Configure the backend application to also accept tokens from `token-exchange-client`
+- **In practice:** Most applications only validate the issuer and signature, not `azp`. Check with the application team to confirm.
+
+#### "Does the proxy handle refresh tokens?"
+
+No. The proxy only intercepts access tokens in the `Authorization: Bearer` header. Refresh tokens are a client-side concern:
+
+- System B refreshes its token directly against its own IdP (RH-SSO) as it always has
+- When System B makes an API call with the new access token, the proxy exchanges it transparently
+- The proxy's in-memory cache means that if System B uses the same access token for multiple requests, only the first request triggers an exchange
+
+#### "Do we need to migrate user accounts between RH-SSO and RHBK?"
+
+**Not for the token exchange to work.** When a token is exchanged for the first time, the target IdP automatically creates a "linked" user identity. The exchange mechanism handles this transparently.
+
+However, for the **application migration itself** (when System A moves to RHBK), the application's end users need to exist in RHBK so they can log in directly. That's a separate migration topic (user federation, database import, LDAP sync, etc.) and is outside the scope of this proxy solution.
+
+### Failure Scenarios
+
+#### "What if the proxy pod goes down?"
+
+- **Same-domain traffic** (token issuer matches the backend's IdP) is unaffected — it doesn't go through the proxy.
+- **Cross-domain traffic** fails with connection errors until Kubernetes restarts the proxy pod (typically within seconds).
+- **For HA:** Run 2+ proxy replicas with a `PodDisruptionBudget`. The Kubernetes Service load-balances across replicas automatically.
+
+#### "What if RH-SSO or RHBK goes down?"
+
+- If the **source IdP** (the one that issued the token) goes down: the exchange may still work temporarily because the target IdP caches JWKS signing keys. Once the cache expires and the target IdP can't reach the source's JWKS endpoint, exchanges fail.
+- If the **target IdP** (the one performing the exchange) goes down: the exchange fails immediately and the proxy returns HTTP 502 to the caller.
+- This is the same impact as any IdP outage — applications that depend on it are affected regardless of the proxy.
+
+### Performance
+
+#### "How much latency does the proxy add?"
+
+- **Same-domain tokens (no exchange needed):** Sub-millisecond. The proxy reads the `iss` claim from the JWT (a base64 decode, no HTTP calls) and forwards the request unchanged.
+- **Cross-domain tokens (exchange needed, first time):** 20–100ms for the HTTP call to the target IdP's token endpoint.
+- **Cross-domain tokens (cached):** Near-zero. The proxy maintains an in-memory cache keyed by a SHA-256 hash of the source token. The same token won't be exchanged again until it approaches expiry.
+- **Note:** The cache is per-pod. If you run 3 proxy replicas, each has its own cache. A token hitting replica 1 gets cached there; if the next request hits replica 2 (via load balancing), it exchanges again. For most workloads this is fine. For high-throughput services, consider sticky sessions or a shared Redis cache (see Section 11.5).
+
+### Migration Strategy
+
+#### "What's the migration sequence for multiple applications?"
+
+Migrate one application at a time:
+
+1. Deploy a proxy instance in front of the application being migrated
+2. Migrate the application to validate against RHBK
+3. Verify cross-domain calls work through the proxy
+4. Move to the next application
+
+Applications that only **call** others (like System B in the problem statement) don't need a proxy in front of them — they keep authenticating against RH-SSO. You only proxy **backends that receive cross-domain tokens**.
+
+#### "When can we remove the proxy?"
+
+- Once **all callers** of a service have migrated to the same IdP as that service, the proxy is no longer needed. Remove it and point traffic directly to the backend.
+- Once **all applications** are on RHBK, decommission RH-SSO entirely and remove all proxies.
+- The proxy is a transitional component — it exists only during the migration period.
+
+#### "Can we roll back if something goes wrong?"
+
+Yes. The bidirectional trust means the proxy works in both directions. If you migrate System A to RHBK and something breaks:
+
+1. Move System A back to RH-SSO
+2. Switch the proxy's `EXPECTED_ISSUER` and `TOKEN_ENDPOINT` to reverse the exchange direction (or simply remove the proxy since all systems are back on RH-SSO)
+
+No data is lost and no permanent changes were made to the applications.
+
+#### "What about applications outside the OpenShift cluster?"
+
+The proxy is exposed via an OCP Route, so external callers can use it too. The calling application simply points to the proxy's Route URL instead of the backend's direct URL. This is a configuration change in the calling application (an environment variable or config file), not a code change.
+
+---
+
+## 13. Troubleshooting Guide
 
 ### Error: "Client not allowed to exchange"
 
@@ -1085,7 +1215,7 @@ Similarly, the RH-SSO certificate is stored in a ConfigMap (`rhsso-ca-cert`) and
 
 ---
 
-## 13. Summary of Key Configuration
+## 14. Summary of Key Configuration
 
 ### Feature Flags Reference
 
