@@ -1,26 +1,26 @@
 ##############################################################################
-# Example: Proxy deployment protecting a LEGACY service (RH-SSO domain).
-# Duplicate and adapt for each service that needs cross-domain protection.
+# Proxy in front of RH-SSO — exchanges RHBK tokens to RH-SSO tokens.
 ##############################################################################
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: token-proxy-legacy
+  name: idp-proxy-rhsso
   namespace: sso-gateway
   labels:
-    app: token-proxy-legacy
+    app: idp-proxy-rhsso
     app.kubernetes.io/part-of: sso-migration
     app.kubernetes.io/component: token-exchange-proxy
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: token-proxy-legacy
+      app: idp-proxy-rhsso
   template:
     metadata:
       labels:
-        app: token-proxy-legacy
+        app: idp-proxy-rhsso
         app.kubernetes.io/part-of: sso-migration
+        app.kubernetes.io/component: token-exchange-proxy
     spec:
       containers:
         - name: proxy
@@ -30,9 +30,9 @@ spec:
               name: http
           envFrom:
             - configMapRef:
-                name: token-proxy-legacy-config
+                name: idp-proxy-rhsso-config
             - secretRef:
-                name: token-proxy-legacy-credentials
+                name: idp-proxy-rhsso-credentials
           resources:
             requests:
               cpu: 50m
@@ -55,27 +55,28 @@ spec:
       restartPolicy: Always
 ---
 ##############################################################################
-# Example: Proxy deployment protecting a MIGRATED service (RHBK domain).
+# Proxy in front of RHBK — exchanges RH-SSO tokens to RHBK tokens.
 ##############################################################################
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: token-proxy-migrated
+  name: idp-proxy-rhbk
   namespace: sso-gateway
   labels:
-    app: token-proxy-migrated
+    app: idp-proxy-rhbk
     app.kubernetes.io/part-of: sso-migration
     app.kubernetes.io/component: token-exchange-proxy
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: token-proxy-migrated
+      app: idp-proxy-rhbk
   template:
     metadata:
       labels:
-        app: token-proxy-migrated
+        app: idp-proxy-rhbk
         app.kubernetes.io/part-of: sso-migration
+        app.kubernetes.io/component: token-exchange-proxy
     spec:
       containers:
         - name: proxy
@@ -85,9 +86,9 @@ spec:
               name: http
           envFrom:
             - configMapRef:
-                name: token-proxy-migrated-config
+                name: idp-proxy-rhbk-config
             - secretRef:
-                name: token-proxy-migrated-credentials
+                name: idp-proxy-rhbk-credentials
           resources:
             requests:
               cpu: 50m

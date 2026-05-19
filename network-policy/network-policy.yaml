@@ -3,46 +3,21 @@
 #
 # These policies enforce which traffic is allowed INTO the namespace.
 # Egress is left unrestricted for the POC to avoid DNS resolution issues.
-# For production, add egress policies that allow DNS (port 53) and IdP
+# For production, add egress policies that allow DNS (port 5353) and IdP
 # communication (port 8443 to labeled namespaces).
 #
 # Prerequisites:
 #   oc label namespace rhsso        sso-migration/idp=true
 #   oc label namespace rhbk         sso-migration/idp=true
 #   oc label namespace sso-gateway  sso-migration/access=true
-#   oc label namespace <app-ns>     sso-migration/access=true
 ##############################################################################
 
-# ─── Allow ingress from OpenShift Router to Gateway ──────────────────
+# ─── Allow ingress from OpenShift Router to IdP Proxy pods ─────────
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-router-to-gateway
-  namespace: sso-gateway
-  labels:
-    app.kubernetes.io/part-of: sso-migration
-spec:
-  podSelector:
-    matchLabels:
-      app: sso-gateway
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              network.openshift.io/policy-group: ingress
-      ports:
-        - port: 8443
-          protocol: TCP
-
-# ─── Allow ingress to Token Exchange Proxy from app namespaces ───────
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-apps-to-token-proxy
+  name: allow-router-to-proxy
   namespace: sso-gateway
   labels:
     app.kubernetes.io/part-of: sso-migration
@@ -56,12 +31,12 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              sso-migration/access: "true"
+              network.openshift.io/policy-group: ingress
       ports:
         - port: 8080
           protocol: TCP
 
-# ─── Allow intra-namespace traffic (proxy → echo backends) ──────────
+# ─── Allow intra-namespace traffic (demo app, etc.) ──────────────
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -80,10 +55,8 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
-        - port: 8443
-          protocol: TCP
 
-# ─── Default deny all other ingress to the namespace ─────────────────
+# ─── Default deny all other ingress to the namespace ─────────────
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

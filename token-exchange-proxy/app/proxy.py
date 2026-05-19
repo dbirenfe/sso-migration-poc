@@ -1,17 +1,18 @@
 """
-Transparent Token Exchange Reverse Proxy
+Transparent Token Exchange Reverse Proxy — IdP Gateway Mode
 
-Sits in front of a protected service and transparently exchanges
-cross-domain JWT tokens so that the backend always receives a token
-from its *own* identity provider.  This enables zero application code
-changes during the RH-SSO -> RHBK migration.
+Sits in front of an Identity Provider (RH-SSO or RHBK) and transparently
+handles cross-domain tokens.  Instead of pre-checking the JWT issuer, it
+uses a "try-first, exchange-on-failure" approach:
 
-Both directions use the standard Token Exchange grant (RFC 8693):
-    grant_type = urn:ietf:params:oauth:grant-type:token-exchange
+  1. Forward the request to the IdP as-is.
+  2. If the IdP rejects it (HTTP 401/403) AND the request carried a
+     Bearer token, attempt a token exchange and retry.
+  3. If the retry also fails, the token is genuinely invalid — return
+     the error to the caller.
 
-Deploy one instance in front of every service that may receive tokens
-from the *other* identity domain.  Configure via environment variables
-(see below) or the Kubernetes ConfigMap.
+This design removes the need to know which app uses which client or IdP.
+Deploy one instance in front of each IdP.
 """
 
 import os
@@ -21,7 +22,6 @@ import hashlib
 import base64
 import logging
 import threading
-from urllib.parse import urljoin
 
 from flask import Flask, request, Response
 import requests as http_client
@@ -34,16 +34,27 @@ logging.basicConfig(
 log = logging.getLogger("token-exchange-proxy")
 
 # ─── Configuration ────────────────────────────────────────────────────
-TARGET_URL         = os.environ["TARGET_URL"]
-EXPECTED_ISSUER    = os.environ["EXPECTED_ISSUER"]
-TOKEN_ENDPOINT     = os.environ["TOKEN_ENDPOINT"]
-GRANT_TYPE         = os.environ.get("GRANT_TYPE", "token-exchange")   # "token-exchange" | "jwt-bearer"
-CLIENT_ID          = os.environ["EXCHANGE_CLIENT_ID"]
-CLIENT_SECRET      = os.environ["EXCHANGE_CLIENT_SECRET"]
-IDP_ALIAS          = os.environ.get("IDP_ALIAS", "")                  # required for token-exchange grant
-CACHE_TTL_BUFFER   = int(os.environ.get("CACHE_TTL_BUFFER_SEC", "30"))
+TARGET_URL          = os.environ["TARGET_URL"]
+TOKEN_ENDPOINT      = os.environ["TOKEN_ENDPOINT"]
+GRANT_TYPE          = os.environ.get("GRANT_TYPE", "token-exchange")
+CLIENT_ID           = os.environ["EXCHANGE_CLIENT_ID"]
+CLIENT_SECRET       = os.environ["EXCHANGE_CLIENT_SECRET"]
+IDP_ALIAS           = os.environ.get("IDP_ALIAS", "")
+CACHE_TTL_BUFFER    = int(os.environ.get("CACHE_TTL_BUFFER_SEC", "30"))
 VERIFY_UPSTREAM_TLS = os.environ.get("VERIFY_UPSTREAM_TLS", "true").lower() == "true"
-LISTEN_PORT        = int(os.environ.get("LISTEN_PORT", "8080"))
+LISTEN_PORT         = int(os.environ.get("LISTEN_PORT", "8080"))
+RETRY_STATUS_CODES  = {
+    int(c.strip())
+    for c in os.environ.get("RETRY_STATUS_CODES", "401,403").split(",")
+    if c.strip()
+}
+REQUEST_TIMEOUT     = int(os.environ.get("REQUEST_TIMEOUT", "30"))
+IDP_EXTERNAL_HOST   = os.environ.get("IDP_EXTERNAL_HOST", "")
+PASSTHROUGH_PREFIXES = tuple(
+    p.strip() for p in os.environ.get(
+        "PASSTHROUGH_PREFIXES", "/admin,/js,/resources,/robots.txt"
+    ).split(",") if p.strip()
+)
 
 # ─── In-memory token cache ────────────────────────────────────────────
 _cache: dict[str, tuple[str, float]] = {}
@@ -51,12 +62,7 @@ _cache_lock = threading.Lock()
 
 
 def _decode_jwt_claims(token: str) -> dict | None:
-    """Decode JWT payload WITHOUT cryptographic verification.
-
-    We only need the `iss` and `exp` claims to decide whether an
-    exchange is necessary.  Signature validation is the job of the
-    downstream identity provider, not this proxy.
-    """
+    """Decode JWT payload WITHOUT cryptographic verification."""
     parts = token.split(".")
     if len(parts) != 3:
         return None
@@ -92,16 +98,17 @@ def _put_cache(original_token: str, new_token: str, expires_in: int):
         _cache[key] = (new_token, expires_at)
 
 
-def _exchange_via_token_exchange(assertion: str) -> dict | None:
-    """RH-SSO 7.6 Token Exchange (tech-preview).
+# ─── Token exchange implementations ──────────────────────────────────
 
-    POST /auth/realms/{realm}/protocol/openid-connect/token
-      grant_type            = urn:ietf:params:oauth:grant-type:token-exchange
-      subject_token         = <foreign JWT>
-      subject_token_type    = urn:ietf:params:oauth:token-type:access_token
-      subject_issuer        = <IdP alias in Keycloak>
-      client_id / client_secret
-    """
+def _exchange_headers() -> dict:
+    """Build headers for exchange calls, including Host to ensure correct issuer."""
+    headers = {}
+    if IDP_EXTERNAL_HOST:
+        headers["Host"] = IDP_EXTERNAL_HOST
+    return headers
+
+
+def _exchange_via_token_exchange(assertion: str) -> dict | None:
     data = {
         "grant_type":         "urn:ietf:params:oauth:grant-type:token-exchange",
         "subject_token":      assertion,
@@ -111,7 +118,8 @@ def _exchange_via_token_exchange(assertion: str) -> dict | None:
         "client_secret":      CLIENT_SECRET,
         "scope":              "openid",
     }
-    resp = http_client.post(TOKEN_ENDPOINT, data=data, verify=VERIFY_UPSTREAM_TLS)
+    resp = http_client.post(TOKEN_ENDPOINT, data=data, headers=_exchange_headers(),
+                            verify=VERIFY_UPSTREAM_TLS, timeout=REQUEST_TIMEOUT)
     if resp.status_code == 200:
         return resp.json()
     log.error("Token Exchange failed (%s): %s", resp.status_code, resp.text)
@@ -119,20 +127,14 @@ def _exchange_via_token_exchange(assertion: str) -> dict | None:
 
 
 def _exchange_via_jwt_bearer(assertion: str) -> dict | None:
-    """RHBK 26.4 JWT Authorization Grant (RFC 7523).
-
-    POST /realms/{realm}/protocol/openid-connect/token
-      grant_type      = urn:ietf:params:oauth:grant-type:jwt-bearer
-      assertion       = <foreign JWT>
-      client_id / client_secret
-    """
     data = {
         "grant_type":     "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "assertion":      assertion,
         "client_id":      CLIENT_ID,
         "client_secret":  CLIENT_SECRET,
     }
-    resp = http_client.post(TOKEN_ENDPOINT, data=data, verify=VERIFY_UPSTREAM_TLS)
+    resp = http_client.post(TOKEN_ENDPOINT, data=data, headers=_exchange_headers(),
+                            verify=VERIFY_UPSTREAM_TLS, timeout=REQUEST_TIMEOUT)
     if resp.status_code == 200:
         return resp.json()
     log.error("JWT Bearer exchange failed (%s): %s", resp.status_code, resp.text)
@@ -143,7 +145,7 @@ def exchange_token(original_token: str) -> str | None:
     """Return a native token for the target IdP, using cache when possible."""
     cached = _get_cached(original_token)
     if cached:
-        log.debug("Cache hit")
+        log.debug("Cache hit — returning previously exchanged token")
         return cached
 
     if GRANT_TYPE == "jwt-bearer":
@@ -167,6 +169,41 @@ EXCLUDED_RESPONSE_HEADERS = frozenset([
 ])
 
 
+def _build_target_url(path: str) -> str:
+    target = f"{TARGET_URL.rstrip('/')}/{path}"
+    qs = request.query_string.decode()
+    if qs:
+        target += f"?{qs}"
+    return target
+
+
+def _forward(target: str, headers: dict, data: bytes):
+    """Send the request to the upstream IdP and return the response."""
+    return http_client.request(
+        method=request.method,
+        url=target,
+        headers=headers,
+        data=data,
+        allow_redirects=False,
+        verify=VERIFY_UPSTREAM_TLS,
+        stream=True,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+
+def _make_response(upstream_resp) -> Response:
+    """Convert an upstream response into a Flask Response.
+
+    Uses urllib3's raw headers to preserve duplicate headers (critically,
+    multiple Set-Cookie headers that the requests library would merge).
+    """
+    resp_headers = [
+        (k, v) for k, v in upstream_resp.raw.headers.items()
+        if k.lower() not in EXCLUDED_RESPONSE_HEADERS
+    ]
+    return Response(upstream_resp.content, upstream_resp.status_code, resp_headers)
+
+
 @app.route("/healthz")
 def healthz():
     return "OK", 200
@@ -180,48 +217,20 @@ def readyz():
 @app.route("/", defaults={"path": ""}, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 @app.route("/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 def proxy_handler(path):
+    request_path = f"/{path}"
+    body = request.get_data()
+    target = _build_target_url(path)
+
+    # ── Build forwarded headers: keep all original headers as-is ────
     auth_header = request.headers.get("Authorization", "")
-    forwarded_headers = {
-        k: v for k, v in request.headers if k.lower() not in ("host",)
-    }
+    forwarded_headers = dict(request.headers)
 
-    if auth_header.lower().startswith("bearer "):
-        token = auth_header[7:]
-        claims = _decode_jwt_claims(token)
+    has_bearer = auth_header.lower().startswith("bearer ")
+    original_token = auth_header[7:] if has_bearer else None
 
-        if claims and claims.get("iss") != EXPECTED_ISSUER:
-            log.info(
-                "Issuer mismatch — got '%s', expected '%s'. Exchanging token.",
-                claims.get("iss"), EXPECTED_ISSUER,
-            )
-            new_token = exchange_token(token)
-            if new_token:
-                forwarded_headers["Authorization"] = f"Bearer {new_token}"
-                log.info("Token exchanged successfully")
-            else:
-                return Response(
-                    json.dumps({"error": "token_exchange_failed",
-                                "error_description": "Could not exchange cross-domain token"}),
-                    status=502,
-                    content_type="application/json",
-                )
-
-    target = f"{TARGET_URL.rstrip('/')}/{path}"
-    qs = request.query_string.decode()
-    if qs:
-        target += f"?{qs}"
-
+    # ── Step 1: forward the request as-is ────────────────────────────
     try:
-        upstream_resp = http_client.request(
-            method=request.method,
-            url=target,
-            headers=forwarded_headers,
-            data=request.get_data(),
-            allow_redirects=False,
-            verify=VERIFY_UPSTREAM_TLS,
-            stream=True,
-            timeout=30,
-        )
+        upstream_resp = _forward(target, forwarded_headers, body)
     except http_client.exceptions.RequestException as exc:
         log.error("Upstream request failed: %s", exc)
         return Response(
@@ -230,16 +239,43 @@ def proxy_handler(path):
             content_type="application/json",
         )
 
-    response_headers = [
-        (k, v) for k, v in upstream_resp.headers.items()
-        if k.lower() not in EXCLUDED_RESPONSE_HEADERS
-    ]
-    return Response(upstream_resp.content, upstream_resp.status_code, response_headers)
+    # ── Step 2: if the IdP rejected it and we have a Bearer token,
+    #            try exchanging the token and retrying ─────────────────
+    if upstream_resp.status_code in RETRY_STATUS_CODES and has_bearer:
+        claims = _decode_jwt_claims(original_token)
+        log.info(
+            "IdP returned %s for token with iss='%s'. Attempting token exchange.",
+            upstream_resp.status_code,
+            claims.get("iss", "unknown") if claims else "non-jwt",
+        )
+
+        new_token = exchange_token(original_token)
+        if new_token:
+            log.info("Token exchanged successfully — retrying request.")
+            retry_headers = dict(forwarded_headers)
+            retry_headers["Authorization"] = f"Bearer {new_token}"
+
+            try:
+                retry_resp = _forward(target, retry_headers, body)
+            except http_client.exceptions.RequestException as exc:
+                log.error("Retry request failed: %s", exc)
+                return _make_response(upstream_resp)
+
+            return _make_response(retry_resp)
+
+        log.warning(
+            "Token exchange failed — returning original %s response. "
+            "Token is likely genuinely invalid.",
+            upstream_resp.status_code,
+        )
+
+    return _make_response(upstream_resp)
 
 
 if __name__ == "__main__":
     log.info(
-        "Starting token-exchange-proxy  target=%s  issuer=%s  grant=%s",
-        TARGET_URL, EXPECTED_ISSUER, GRANT_TYPE,
+        "Starting token-exchange-proxy (IdP gateway mode)  "
+        "target=%s  grant=%s  retry_on=%s",
+        TARGET_URL, GRANT_TYPE, RETRY_STATUS_CODES,
     )
     app.run(host="0.0.0.0", port=LISTEN_PORT)

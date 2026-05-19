@@ -1,9 +1,10 @@
 # SSO Migration — Parallel RH-SSO / RHBK with Zero Downtime
 
 Gradual migration from **RH-SSO 7.6.5** to **RHBK 26.4** with no application
-code changes.  Cross-domain tokens are transparently exchanged by an
-infrastructure-level proxy so that every application always receives tokens
-from its own identity provider.
+code changes.  **IdP Gateway Proxies** sit in front of each identity provider
+and use a "try-first, exchange-on-failure" approach to transparently swap
+cross-domain tokens — every application always receives tokens from its own
+IdP, without any per-application configuration.
 
 ---
 
@@ -11,7 +12,7 @@ from its own identity provider.
 
 ```
                         ┌──────────────────────────────────────┐
-                        │              DNS                     │
+                        │              DNS / OCP Routes         │
                         │  rhsso.apps.cluster.domain.com ──┐   │
                         │  rhbk.apps.cluster.domain.com  ──┤   │
                         └──────────────────────────────────┼───┘
@@ -20,46 +21,46 @@ from its own identity provider.
               ┌─────────────────── OpenShift Cluster ───────────────────┐
               │                                                        │
               │  ┌──────────────────────────────────────┐              │
-              │  │      API Gateway (NGINX)             │              │
-              │  │      namespace: sso-gateway          │              │
+              │  │      sso-gateway namespace           │              │
               │  │                                      │              │
-              │  │  ┌──────────┐      ┌──────────┐     │              │
-              │  │  │ vhost:   │      │ vhost:   │     │              │
-              │  │  │ rhsso.*  │      │ rhbk.*   │     │              │
-              │  │  └────┬─────┘      └────┬─────┘     │              │
-              │  └───────┼─────────────────┼────────────┘              │
-              │          │                 │                           │
-              │          │  (in-cluster    │  (in-cluster              │
-              │          │   Service)      │   Service)                │
-              │          ▼                 ▼                           │
+              │  │  ┌────────────────┐  ┌─────────────────┐           │
+              │  │  │ idp-proxy-rhsso│  │ idp-proxy-rhbk  │           │
+              │  │  │ (IdP Gateway)  │  │ (IdP Gateway)   │           │
+              │  │  │ route: rhsso.* │  │ route: rhbk.*   │           │
+              │  │  └────────┬───────┘  └────────┬────────┘           │
+              │  └───────────┼───────────────────┼────────────────────┘│
+              │              │                   │                     │
+              │              ▼                   ▼                     │
               │  ┌────────────────┐  ┌────────────────┐               │
               │  │ RH-SSO 7.6.5  │  │ RHBK 26.4      │               │
               │  │ ns: rhsso     │  │ ns: rhbk       │               │
               │  │               │◄─── trust ───►│               │    │
               │  │ IdP: rhbk     │  │ IdP: rhsso     │               │
-              │  │ Token Exchange│  │ JWT Auth Grant  │               │
+              │  │ Token Exchange│  │ Token Exchange  │               │
               │  └────────────────┘  └────────────────┘               │
               └────────────────────────────────────────────────────────┘
 
 
-         Cross-domain service-to-service calls:
+         How cross-domain tokens are handled:
 
-        ┌───────────┐   RHBK     ┌─────────────────────┐  RH-SSO   ┌───────────┐
-        │ System B  │  token     │ Token Exchange Proxy │  token    │ System A  │
-        │ (backend) │ ────────►  │  (transparent)       │ ────────► │ (backend) │
-        └───────────┘            │                      │           └───────────┘
-                                 │  1. Detect issuer    │
-                                 │  2. Exchange token   │
-                                 │  3. Forward request  │
-                                 └─────────────────────┘
+        ┌───────────┐                ┌─────────────────┐          ┌────────────┐
+        │ Any caller │  Bearer token │ idp-proxy-rhbk  │  native  │   RHBK     │
+        │ (app, CLI, │ ────────────► │ (in front of    │  token   │            │
+        │  browser)  │               │  RHBK)          │ ───────► │            │
+        └───────────┘               │                  │          └────────────┘
+                                    │ 1. Forward as-is │
+                                    │ 2. If 401+Bearer │
+                                    │    → exchange    │
+                                    │    → retry       │
+                                    └──────────────────┘
 ```
 
 ### Components
 
 | # | Component | Purpose | Location |
 |---|-----------|---------|----------|
-| 1 | **API Gateway** | Routes identity traffic by hostname to the correct IdP | `gateway/` |
-| 2 | **Token Exchange Proxy** | Transparent reverse proxy that swaps cross-domain tokens | `token-exchange-proxy/` |
+| 1 | **IdP Gateway Proxies** | `idp-proxy-rhsso` and `idp-proxy-rhbk` — transparent reverse proxies in front of each IdP that swap cross-domain tokens on failure | `token-exchange-proxy/` |
+| 2 | **Proxy Routes** | OCP Routes that direct IdP hostnames to the proxy services (edge TLS) | `token-exchange-proxy/` |
 | 3 | **Keycloak Config** | IdP trust + exchange clients on both RH-SSO and RHBK | `keycloak-config/` |
 | 4 | **Network Policies** | Lock down namespace traffic | `network-policy/` |
 
@@ -68,14 +69,19 @@ from its own identity provider.
 The original problem: when System A migrates from RH-SSO to RHBK, System B
 still holds RH-SSO tokens that System A no longer accepts.
 
-The solution deploys a **Token Exchange Proxy** in front of System A.
-The proxy inspects the `iss` claim in every incoming Bearer token:
+The solution deploys **IdP Gateway Proxies** in front of each Identity Provider
+(`idp-proxy-rhsso` in front of RH-SSO, `idp-proxy-rhbk` in front of RHBK).
+All external traffic to each IdP flows through its proxy. The proxy uses a
+"try-first, exchange-on-failure" approach:
 
-- **Issuer matches** → forward the request untouched
-- **Issuer mismatch** → exchange the token at the correct IdP's token endpoint,
-  replace the `Authorization` header, then forward
+- Forward every request to the IdP **as-is**
+- If the IdP returns **401/403** AND the request has a Bearer token →
+  **exchange the token** and **retry** the request
+- If the retry also fails → the token is genuinely invalid
+- Non-Bearer requests (login pages, token grants, admin console) pass through untouched
 
-The applications never see foreign tokens. No code changes required.
+No per-application proxy setup is needed. The applications never see foreign
+tokens. No code changes required.
 
 ---
 
@@ -98,30 +104,25 @@ The applications never see foreign tokens. No code changes required.
 
 ```bash
 # Review the files, replace all <PLACEHOLDER> values
-grep -rn '<.*>' gateway/ token-exchange-proxy/ keycloak-config/
+grep -rn '<.*>' token-exchange-proxy/ keycloak-config/
 ```
 
-### Step 1 — Deploy the API Gateway
+### Step 1 — Deploy the Gateway Namespace and Routes
 
 ```bash
 # Create the namespace
-oc apply -f gateway/00-namespace.yaml
+oc apply -f token-exchange-proxy/00-namespace.yaml
 
-# Create TLS secrets (edit 01-tls-secret.yaml first with real certs)
-oc apply -f gateway/01-tls-secret.yaml
-
-# Deploy NGINX
-oc apply -f gateway/02-configmap.yaml
-oc apply -f gateway/03-deployment.yaml
-oc apply -f gateway/04-service.yaml
-
-# Create the OpenShift Routes
-oc apply -f gateway/05-route-rhsso.yaml
-oc apply -f gateway/06-route-rhbk.yaml
+# Create the OpenShift Routes (these point IdP hostnames to the proxy services)
+oc apply -f token-exchange-proxy/06-route-rhsso.yaml
+oc apply -f token-exchange-proxy/07-route-rhbk.yaml
 
 # Verify
-oc -n sso-gateway get pods,svc,routes
+oc -n sso-gateway get routes
 ```
+
+> **Important:** Disable the RHBK operator's built-in ingress to prevent a competing Route:
+> `oc -n rhbk patch keycloak rhbk --type=merge -p '{"spec":{"ingress":{"enabled":false}}}'`
 
 ### Step 2 — Update DNS
 
@@ -132,7 +133,7 @@ rhsso.apps.cluster.domain.com  →  <OpenShift Router IP or CNAME>
 rhbk.apps.cluster.domain.com   →  <OpenShift Router IP or CNAME>
 ```
 
-Verify routing:
+Verify routing (after deploying the proxies in Step 4):
 ```bash
 curl -sk https://rhsso.apps.cluster.domain.com/auth/realms/master
 curl -sk https://rhbk.apps.cluster.domain.com/realms/master
@@ -148,54 +149,50 @@ Summary:
 
 Verify with the curl commands in `SETUP.md`.
 
-### Step 4 — Build and deploy the Token Exchange Proxy
+### Step 4 — Build and deploy the IdP Gateway Proxies
 
 ```bash
 # Create the BuildConfig and ImageStream
-oc apply -f token-exchange-proxy/04-buildconfig.yaml
+oc apply -f token-exchange-proxy/01-buildconfig.yaml
 
 # Build the image from local source
 oc -n sso-gateway start-build token-exchange-proxy \
   --from-dir=./token-exchange-proxy --follow
 
 # Edit the ConfigMaps and Secrets with real values
-# (see token-exchange-proxy/00-configmap.yaml and 01-secret.yaml)
-oc apply -f token-exchange-proxy/00-configmap.yaml
-oc apply -f token-exchange-proxy/01-secret.yaml
+# (see token-exchange-proxy/02-configmap.yaml and 03-secret.yaml)
+# Key settings: TARGET_URL, TOKEN_ENDPOINT, IDP_EXTERNAL_HOST
+oc apply -f token-exchange-proxy/02-configmap.yaml
+oc apply -f token-exchange-proxy/03-secret.yaml
 
-# Deploy
-oc apply -f token-exchange-proxy/02-deployment.yaml
-oc apply -f token-exchange-proxy/03-service.yaml
+# Deploy (creates idp-proxy-rhsso and idp-proxy-rhbk)
+oc apply -f token-exchange-proxy/04-deployment.yaml
+oc apply -f token-exchange-proxy/05-service.yaml
 
 # Verify
 oc -n sso-gateway get pods -l app.kubernetes.io/component=token-exchange-proxy
 ```
 
-### Step 5 — Wire the proxy into the service mesh
+### Step 5 — Verify IdP access through the proxies
 
-For each service that needs cross-domain token support, update the
-calling service's configuration to point to the Token Exchange Proxy
-**instead of** the target service directly.
+With IdP Gateway Mode, no per-application wiring is needed. The OCP Routes
+already direct all IdP traffic through the proxies. Verify:
 
-**Example:** System B currently calls `http://system-a-service:8080`.
-Update its service endpoint (environment variable, ConfigMap, etc.) to
-`http://token-proxy-legacy.sso-gateway.svc.cluster.local:8080`.
+```bash
+# RH-SSO admin console (through idp-proxy-rhsso)
+curl -sk https://rhsso.apps.cluster.domain.com/auth/realms/master | head -1
 
-> This is an **infrastructure/config change**, not a code change.
-> The application code stays the same.
+# RHBK admin console (through idp-proxy-rhbk)
+curl -sk https://rhbk.apps.cluster.domain.com/realms/master | head -1
 
-Alternative: use an OpenShift Service + ExternalName to transparently
-redirect at the DNS level:
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: system-a-service          # same name the consumer already uses
-  namespace: app-b-namespace      # in System B's namespace
-spec:
-  type: ExternalName
-  externalName: token-proxy-legacy.sso-gateway.svc.cluster.local
+# Test cross-domain exchange: send an RH-SSO token to RHBK's userinfo
+curl -sk https://rhbk.apps.cluster.domain.com/realms/myrealm/protocol/openid-connect/userinfo \
+  -H "Authorization: Bearer <rhsso-token>"
+# Check idp-proxy-rhbk logs for exchange activity
 ```
+
+> All applications that authenticate or validate tokens against the IdPs
+> automatically go through the proxies. No service rewiring needed.
 
 ### Step 6 — Apply network policies
 
@@ -230,18 +227,18 @@ export TEST_PASSWORD="testpassword"
 
 ## Gradual Migration Workflow
 
-Once the infrastructure is in place, migrate clients one at a time:
+Once the IdP Gateway Proxies are deployed (one-time setup), migrate clients
+one at a time:
 
 1. **Export** the client configuration from RH-SSO
 2. **Import** it into RHBK
 3. **Update** the application's OIDC configuration to point to RHBK
-4. **Deploy** a Token Exchange Proxy instance in front of the service
-   (if other services call it with old tokens)
-5. **Test** the flow end-to-end
-6. **Remove** the client from RH-SSO once all consumers have migrated
+4. **Test** the flow end-to-end — cross-domain tokens are handled automatically
+   by the IdP proxies, no per-application proxy setup needed
+5. **Remove** the client from RH-SSO once all consumers have migrated
 
-Repeat until all clients are on RHBK, then decommission RH-SSO and the
-Token Exchange Proxies.
+Repeat until all clients are on RHBK, then decommission RH-SSO and remove
+the IdP Gateway Proxies.
 
 ---
 
@@ -250,24 +247,20 @@ Token Exchange Proxies.
 ```
 .
 ├── README.md                              ← You are here
-├── gateway/
+├── token-exchange-proxy/    # All proxy files including routes and namespace
 │   ├── 00-namespace.yaml                  Namespace definition
-│   ├── 01-tls-secret.yaml                 TLS certificate secrets (template)
-│   ├── 02-configmap.yaml                  NGINX routing configuration
-│   ├── 03-deployment.yaml                 NGINX Deployment
-│   ├── 04-service.yaml                    ClusterIP Service
-│   ├── 05-route-rhsso.yaml               OpenShift Route for rhsso.*
-│   └── 06-route-rhbk.yaml                OpenShift Route for rhbk.*
+│   ├── 06-route-rhsso.yaml               OCP Route: rhsso.* → idp-proxy-rhsso (edge TLS)
+│   └── 07-route-rhbk.yaml                OCP Route: rhbk.*  → idp-proxy-rhbk  (edge TLS)
 ├── token-exchange-proxy/
 │   ├── app/
-│   │   ├── proxy.py                       Python reverse proxy with token exchange
+│   │   ├── proxy.py                       Python reverse proxy — IdP Gateway Mode
 │   │   └── requirements.txt               Python dependencies
 │   ├── Dockerfile                         Container image build
-│   ├── 00-configmap.yaml                  Proxy configuration (two examples)
-│   ├── 01-secret.yaml                     Client credentials
-│   ├── 02-deployment.yaml                 Proxy Deployments (legacy + migrated)
-│   ├── 03-service.yaml                    Proxy Services
-│   └── 04-buildconfig.yaml                OpenShift BuildConfig + ImageStream
+│   ├── 02-configmap.yaml                  Proxy configuration (idp-proxy-rhsso + idp-proxy-rhbk)
+│   ├── 03-secret.yaml                     Client credentials (per proxy instance)
+│   ├── 04-deployment.yaml                 Proxy Deployments (idp-proxy-rhsso + idp-proxy-rhbk)
+│   ├── 05-service.yaml                    Proxy Services
+│   └── 01-buildconfig.yaml                OpenShift BuildConfig + ImageStream
 ├── keycloak-config/
 │   ├── SETUP.md                           Step-by-step Keycloak configuration
 │   ├── rhsso-add-rhbk-idp.json           Partial realm import for RH-SSO

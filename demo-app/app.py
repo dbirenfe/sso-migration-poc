@@ -53,8 +53,28 @@ def _discover_routes_in_ns(namespace):
 
 
 def _discover_routes():
-    """Find external route URLs for RH-SSO and RHBK namespaces."""
-    return _discover_routes_in_ns("rhsso"), _discover_routes_in_ns("rhbk")
+    """Find external route URLs for RH-SSO and RHBK.
+
+    Searches sso-gateway (proxy routes), rhsso, and rhbk namespaces.
+    Matches routes by hostname keywords.
+    """
+    rhsso, rhbk = None, None
+    for ns in ["sso-gateway", "rhsso", "rhbk"]:
+        data = _k8s_api(f"/apis/route.openshift.io/v1/namespaces/{ns}/routes")
+        if not data or "items" not in data:
+            continue
+        for route in data["items"]:
+            host = route.get("spec", {}).get("host", "")
+            name = route.get("metadata", {}).get("name", "")
+            if not host or host == "keycloak.local" or "metrics" in name or "demo" in name:
+                continue
+            if not rhsso and ("rhsso" in host or "rhsso" in name):
+                rhsso = f"https://{host}"
+            elif not rhbk and ("rhbk" in host or "rhbk" in name):
+                rhbk = f"https://{host}"
+        if rhsso and rhbk:
+            break
+    return rhsso, rhbk
 
 
 def _discover_service(namespace, *names):
@@ -301,9 +321,9 @@ def api_scenario_run():
         elif scenario_id == "exchange_rhsso_to_rhbk":
             steps = _scenario_exchange("rhsso", "rhbk")
         elif scenario_id == "proxy_legacy":
-            steps = _scenario_proxy("rhbk", "legacy")
+            steps = _scenario_idp_proxy("rhbk", "rhsso")
         elif scenario_id == "proxy_migrated":
-            steps = _scenario_proxy("rhsso", "migrated")
+            steps = _scenario_idp_proxy("rhsso", "rhbk")
         elif scenario_id == "chained_rhsso_via_rhbk":
             steps = _scenario_chained("rhsso", "rhbk", "rhsso")
         elif scenario_id == "chained_rhbk_via_rhsso":
@@ -342,8 +362,8 @@ def _scenario_direct(provider):
     ok = code == 200 and isinstance(body, dict) and "access_token" in body
 
     step = {
-        "step": f"Acquire token from {label}",
-        "description": f"User authenticates directly against {label} using password grant",
+        "step": f"Acquire token from {label} (via IdP Proxy)",
+        "description": f"Request goes through the IdP Proxy in front of {label}. Since this is a password grant (no Bearer token), the proxy forwards it as-is (pass-through). {label} issues the token.",
         "success": ok,
         "status_code": code,
         "elapsed_ms": elapsed,
@@ -386,8 +406,8 @@ def _scenario_exchange(source, target):
     ok = code == 200 and isinstance(body, dict) and "access_token" in body
 
     step = {
-        "step": f"Exchange {source_label} token at {target_label}",
-        "description": f"{target_label} receives the {source_label} token and issues a native {target_label} token via RFC 8693 Token Exchange",
+        "step": f"Exchange {source_label} token at {target_label} (via IdP Proxy)",
+        "description": f"The exchange request goes through the IdP Proxy in front of {target_label}. Since the exchange POST carries no Bearer token (the foreign token is in the form body), the proxy forwards it as-is (pass-through). {target_label} validates the {source_label} token via IdP trust and issues a native {target_label} token (RFC 8693).",
         "success": ok,
         "status_code": code,
         "elapsed_ms": elapsed,
@@ -407,21 +427,27 @@ def _scenario_exchange(source, target):
     return steps
 
 
-def _scenario_proxy(token_source, proxy_type):
+def _scenario_idp_proxy(token_source, target_idp):
+    """Test the IdP gateway proxy: get a token from one IdP, send it to
+    the other IdP's userinfo endpoint (through the proxy), and verify
+    the proxy exchanges it transparently."""
     steps = _scenario_direct(token_source)
     if not steps[0]["success"]:
         return steps
 
     source_token = steps[0]["token"]
     source_label = "RH-SSO" if token_source == "rhsso" else "RHBK"
-    proxy_label = "Legacy (RH-SSO)" if proxy_type == "legacy" else "Migrated (RHBK)"
-    proxy_svc = f"token-proxy-{proxy_type}.sso-gateway.svc.cluster.local:8080"
+    target_label = "RH-SSO" if target_idp == "rhsso" else "RHBK"
 
-    proxy_url = f"http://{proxy_svc}/"
-    exchange_expected = token_source != ("rhsso" if proxy_type == "legacy" else "rhbk")
+    userinfo_url = _base_url(target_idp, internal=False)
+    if target_idp == "rhsso":
+        userinfo_url += f"/auth/realms/{REALM}/protocol/openid-connect/userinfo"
+    else:
+        userinfo_url += f"/realms/{REALM}/protocol/openid-connect/userinfo"
+
     t0 = time.time()
     try:
-        r = http.get(proxy_url,
+        r = http.get(userinfo_url,
                      headers={"Authorization": f"Bearer {source_token}"},
                      verify=False, timeout=TIMEOUT)
         code = r.status_code
@@ -431,37 +457,30 @@ def _scenario_proxy(token_source, proxy_type):
         resp_body = str(e)
     elapsed = round((time.time() - t0) * 1000)
 
-    # The backend is an echo/httpd server that may return 403 for /
-    # which is expected. A 502 means the proxy couldn't exchange the token.
-    # A 500 means a proxy-internal error (e.g., can't reach IdP).
-    ok = code > 0 and code != 500 and code != 502
-
-    desc = (
-        f"The proxy inspects the JWT issuer, detects it doesn't match "
-        f"the expected issuer, performs a token exchange transparently, "
-        f"and forwards the request with the new token to the backend."
-        if exchange_expected
-        else f"The proxy inspects the JWT issuer, finds it matches the expected issuer, "
-             f"and forwards the request unchanged (pass-through)."
-    )
-
-    status_note = ""
-    if code == 403:
-        status_note = " (403 is expected from the echo backend — the token exchange itself succeeded)"
-    elif code == 200:
-        status_note = " (backend responded OK)"
+    ok = code == 200
 
     step = {
-        "step": f"Send {source_label} token through {proxy_label} proxy",
-        "description": desc,
+        "step": f"Send {source_label} token to {target_label} userinfo (via IdP Proxy)",
+        "description": (
+            f"The request carries a Bearer token (from {source_label}) and hits the IdP Proxy in front of {target_label}. "
+            f"Step 1: Proxy forwards it as-is to {target_label}. "
+            f"Step 2: {target_label} rejects it with 401 (wrong issuer). "
+            f"Step 3: Proxy catches the 401, sees the Bearer token, and calls {target_label}'s token exchange endpoint to swap the {source_label} token for a native {target_label} token. "
+            f"Step 4: Proxy retries the userinfo request with the new {target_label} token. "
+            f"Step 5: {target_label} accepts it and returns 200 with userinfo."
+        ),
         "success": ok,
         "status_code": code,
-        "status_note": status_note,
         "elapsed_ms": elapsed,
-        "endpoint": proxy_url,
+        "endpoint": userinfo_url,
         "response_preview": resp_body[:200] if resp_body else "",
-        "exchange_performed": exchange_expected,
+        "exchange_performed": True,
     }
+    if ok:
+        try:
+            step["userinfo"] = json.loads(resp_body)
+        except Exception:
+            pass
     steps.append(step)
     return steps
 
@@ -546,22 +565,27 @@ def _scenario_chained(initial_source, intermediate, final_target):
 def _scenario_full_migration():
     """Simulates the complete migration scenario described by the customer:
     System A migrated to RHBK, System B still on RH-SSO.
-    System B gets a token from RH-SSO and calls System A (now on RHBK).
-    The proxy transparently exchanges the token."""
+    System B gets a token from RH-SSO and tries to use RHBK.
+    The proxy in front of RHBK transparently exchanges the token."""
     steps = []
 
     steps.append({
         "step": "Context: System B authenticates against RH-SSO",
         "description": (
             "System B has no client of its own — it uses Client A on RH-SSO to get a token. "
-            "System A has already been migrated to RHBK, but System B doesn't know that."
+            "System A has already been migrated to RHBK, but System B doesn't know that. "
+            "All traffic goes through the IdP Proxies."
         ),
         "success": True, "info_only": True,
     })
 
     direct = _scenario_direct("rhsso")
-    direct[0]["step"] = "System B acquires token from RH-SSO (Client A)"
-    direct[0]["description"] = "System B calls RH-SSO with Client A credentials and gets an access token"
+    direct[0]["step"] = "System B acquires token from RH-SSO via IdP Proxy (pass-through)"
+    direct[0]["description"] = (
+        "System B sends a password grant request to RH-SSO. The request goes through the "
+        "IdP Proxy in front of RH-SSO. Since there is no Bearer token (it's a POST with "
+        "form credentials), the proxy forwards it as-is. RH-SSO issues the token."
+    )
     steps.extend(direct)
     if not direct[0]["success"]:
         return steps
@@ -569,53 +593,63 @@ def _scenario_full_migration():
     rhsso_token = direct[0]["token"]
 
     steps.append({
-        "step": "System B calls System A's API (now behind RHBK proxy)",
+        "step": "System B calls RHBK's userinfo — IdP Proxy intercepts",
         "description": (
-            "System B sends the RH-SSO token to System A's endpoint. "
-            "The Token Exchange Proxy sits in front of System A."
+            "System B sends a GET request with 'Authorization: Bearer <RH-SSO token>' to RHBK's "
+            "userinfo endpoint. The request hits the IdP Proxy in front of RHBK."
         ),
         "success": True, "info_only": True,
     })
 
-    proxy_svc = "token-proxy-migrated.sso-gateway.svc.cluster.local:8080"
-    proxy_url = f"http://{proxy_svc}/"
+    userinfo_url = _base_url("rhbk", internal=False)
+    userinfo_url += f"/realms/{REALM}/protocol/openid-connect/userinfo"
+
     t0 = time.time()
     try:
-        r = http.get(proxy_url,
+        r = http.get(userinfo_url,
                      headers={"Authorization": f"Bearer {rhsso_token}"},
                      verify=False, timeout=TIMEOUT)
         code = r.status_code
+        resp_body = r.text[:500]
     except Exception as e:
         code = 0
+        resp_body = str(e)
     elapsed = round((time.time() - t0) * 1000)
 
-    proxy_ok = code > 0 and code != 500 and code != 502
-    status_note = " (403 from echo backend is expected — token exchange succeeded)" if code == 403 else ""
+    proxy_ok = code == 200
 
     steps.append({
-        "step": "Proxy detects issuer mismatch and exchanges token",
+        "step": "IdP Proxy: forward → 401 → exchange → retry",
         "description": (
-            f"The proxy decoded the JWT, saw issuer=RH-SSO but expected RHBK. "
-            f"It called RHBK's token exchange endpoint to swap the RH-SSO token "
-            f"for a native RHBK token, then forwarded the request to System A."
+            "Step 1: The IdP Proxy forwards the request with the RH-SSO Bearer token to RHBK as-is. "
+            "Step 2: RHBK rejects it with HTTP 401 (the token's issuer is RH-SSO, not RHBK). "
+            "Step 3: The proxy catches the 401, detects the Bearer token, and calls RHBK's "
+            "token exchange endpoint to swap the RH-SSO token for a native RHBK token. "
+            "Step 4: The proxy retries the original userinfo request with the new RHBK token."
         ),
         "success": proxy_ok,
         "status_code": code,
-        "status_note": status_note,
         "elapsed_ms": elapsed,
+        "endpoint": userinfo_url,
         "exchange_performed": True,
     })
 
     steps.append({
-        "step": "System A receives request with valid RHBK token",
+        "step": "RHBK accepts the retried request with the exchanged token",
         "description": (
-            "System A validates the token against RHBK (its own IdP) — the token is valid. "
-            "System B's request succeeds without any code changes to either system."
+            "RHBK receives the retry with a valid native RHBK token, validates it, "
+            "and returns HTTP 200 with the userinfo response. The proxy forwards this "
+            "back to System B. System B received a successful response — it never knew "
+            "the token was exchanged. Zero code changes on any system."
         ),
         "success": proxy_ok,
         "status_code": code,
-        "status_note": status_note,
     })
+    if proxy_ok:
+        try:
+            steps[-1]["userinfo"] = json.loads(resp_body)
+        except Exception:
+            pass
 
     return steps
 

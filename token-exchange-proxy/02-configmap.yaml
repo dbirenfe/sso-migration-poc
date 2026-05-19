@@ -1,0 +1,54 @@
+##############################################################################
+# Token Exchange Proxy — IdP Gateway Mode Configuration
+#
+# Deploy ONE instance in front of each Identity Provider.
+# The proxy forwards requests to the IdP as-is. If the IdP rejects the
+# token (401/403), the proxy exchanges it and retries automatically.
+#
+#   (A) In front of RH-SSO — exchanges incoming RHBK tokens → RH-SSO.
+#   (B) In front of RHBK   — exchanges incoming RH-SSO tokens → RHBK.
+#
+# TOKEN_ENDPOINT uses in-cluster service URLs for reliability.
+##############################################################################
+
+# ─── A: Proxy in front of RH-SSO ──────────────────────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idp-proxy-rhsso-config
+  namespace: sso-gateway
+  labels:
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: token-exchange-proxy
+data:
+  TARGET_URL: "https://keycloak.rhsso.svc.cluster.local:8443"
+  TOKEN_ENDPOINT: "https://keycloak.rhsso.svc.cluster.local:8443/auth/realms/myrealm/protocol/openid-connect/token"
+  IDP_EXTERNAL_HOST: "keycloak-rhsso.apps.cluster-nf2q4.dynamic2.redhatworkshops.io"
+  GRANT_TYPE: "token-exchange"
+  IDP_ALIAS: "rhbk"
+  VERIFY_UPSTREAM_TLS: "false"
+  LISTEN_PORT: "8080"
+  RETRY_STATUS_CODES: "401,403"
+  REQUEST_TIMEOUT: "30"
+
+# ─── B: Proxy in front of RHBK ────────────────────────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idp-proxy-rhbk-config
+  namespace: sso-gateway
+  labels:
+    app.kubernetes.io/part-of: sso-migration
+    app.kubernetes.io/component: token-exchange-proxy
+data:
+  TARGET_URL: "https://rhbk-service.rhbk.svc.cluster.local:8443"
+  TOKEN_ENDPOINT: "https://rhbk-service.rhbk.svc.cluster.local:8443/realms/myrealm/protocol/openid-connect/token"
+  IDP_EXTERNAL_HOST: "rhbk-rhbk.apps.cluster-nf2q4.dynamic2.redhatworkshops.io"
+  GRANT_TYPE: "token-exchange"
+  IDP_ALIAS: "rhsso"
+  VERIFY_UPSTREAM_TLS: "false"
+  LISTEN_PORT: "8080"
+  RETRY_STATUS_CODES: "401,403"
+  REQUEST_TIMEOUT: "30"

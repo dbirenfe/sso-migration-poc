@@ -2,7 +2,7 @@
 
 ## Deploying the SSO Migration Solution to an Air-Gapped Customer Environment
 
-**Scenario:** You are on-site at a customer with an **offline (air-gapped) OpenShift cluster** that already has **RH-SSO 7.6.5** and **RHBK 26.4** running. You need to deploy the token exchange solution so they can begin gradual application migration.
+**Scenario:** You are on-site at a customer with an **offline (air-gapped) OpenShift cluster** that already has **RH-SSO 7.6.5** and **RHBK 26.4** running. You need to deploy the token exchange solution (IdP Gateway Mode) so they can begin gradual application migration.
 
 ---
 
@@ -651,7 +651,9 @@ curl -sk "${RHSSO_URL}/auth/realms/${REALM}/protocol/openid-connect/token" \
 
 ---
 
-## Step 10: Deploy the Token Exchange Proxy
+## Step 10: Deploy the Token Exchange Proxy (IdP Gateway Mode)
+
+The proxy is deployed **in front of each IdP** (not in front of applications). Two instances: `idp-proxy-rhsso` in front of RH-SSO and `idp-proxy-rhbk` in front of RHBK. The proxy uses a "try-first, exchange-on-failure" approach — it forwards requests to the IdP as-is, and only exchanges the token if the IdP rejects it with 401/403.
 
 ### 10.1 Create the namespace
 
@@ -662,13 +664,27 @@ oc label namespace ${RHBK_NS}  sso-migration/idp=true
 oc label namespace sso-gateway  sso-migration/access=true
 ```
 
-### 10.2 Create the ConfigMaps
+### 10.2 Disable RHBK operator ingress
 
-You need to customize these for the customer's environment. The key values to set:
+The RHBK operator automatically creates a Route for the RHBK hostname. This competes with the proxy route and must be disabled:
 
 ```bash
-# ── Proxy for legacy apps (validates RH-SSO tokens) ──
-# Exchanges incoming RHBK tokens → RH-SSO tokens
+oc -n ${RHBK_NS} patch keycloak ${RHBK_CR} --type=merge -p '{
+  "spec": {
+    "ingress": {
+      "enabled": false
+    }
+  }
+}'
+```
+
+### 10.3 Create the ConfigMaps
+
+You need to customize these for the customer's environment. The `TARGET_URL` points to the IdP's internal service (not an application).
+
+```bash
+# ── Proxy in front of RH-SSO ──
+# Forwards all traffic to RH-SSO. Exchanges RHBK tokens → RH-SSO tokens on 401/403.
 
 RHSSO_SVC_NAME="<service-name>"    # from Step 1, e.g. "keycloak"
 RHSSO_SVC_PORT="8443"              # typically 8443
@@ -677,20 +693,22 @@ cat <<EOF | oc apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: token-proxy-legacy-config
+  name: idp-proxy-rhsso-config
   namespace: sso-gateway
 data:
-  TARGET_URL: "http://<LEGACY-APP-SERVICE>.<LEGACY-APP-NAMESPACE>.svc.cluster.local:<PORT>"
-  EXPECTED_ISSUER: "${RHSSO_URL}/auth/realms/${REALM}"
+  TARGET_URL: "https://${RHSSO_SVC_NAME}.${RHSSO_NS}.svc.cluster.local:${RHSSO_SVC_PORT}"
   TOKEN_ENDPOINT: "https://${RHSSO_SVC_NAME}.${RHSSO_NS}.svc.cluster.local:${RHSSO_SVC_PORT}/auth/realms/${REALM}/protocol/openid-connect/token"
+  IDP_EXTERNAL_HOST: "${RHSSO_ROUTE}"
   GRANT_TYPE: "token-exchange"
   IDP_ALIAS: "rhbk"
   VERIFY_UPSTREAM_TLS: "false"
   LISTEN_PORT: "8080"
+  RETRY_STATUS_CODES: "401,403"
+  REQUEST_TIMEOUT: "30"
 EOF
 
-# ── Proxy for migrated apps (validates RHBK tokens) ──
-# Exchanges incoming RH-SSO tokens → RHBK tokens
+# ── Proxy in front of RHBK ──
+# Forwards all traffic to RHBK. Exchanges RH-SSO tokens → RHBK tokens on 401/403.
 
 RHBK_SVC_NAME="<service-name>"    # from Step 1, e.g. "rhbk-service"
 RHBK_SVC_PORT="8443"
@@ -699,31 +717,35 @@ cat <<EOF | oc apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: token-proxy-migrated-config
+  name: idp-proxy-rhbk-config
   namespace: sso-gateway
 data:
-  TARGET_URL: "http://<MIGRATED-APP-SERVICE>.<MIGRATED-APP-NAMESPACE>.svc.cluster.local:<PORT>"
-  EXPECTED_ISSUER: "${RHBK_URL}/realms/${REALM}"
+  TARGET_URL: "https://${RHBK_SVC_NAME}.${RHBK_NS}.svc.cluster.local:${RHBK_SVC_PORT}"
   TOKEN_ENDPOINT: "https://${RHBK_SVC_NAME}.${RHBK_NS}.svc.cluster.local:${RHBK_SVC_PORT}/realms/${REALM}/protocol/openid-connect/token"
+  IDP_EXTERNAL_HOST: "${RHBK_ROUTE}"
   GRANT_TYPE: "token-exchange"
   IDP_ALIAS: "rhsso"
   VERIFY_UPSTREAM_TLS: "false"
   LISTEN_PORT: "8080"
+  RETRY_STATUS_CODES: "401,403"
+  REQUEST_TIMEOUT: "30"
 EOF
 ```
 
-> **`EXPECTED_ISSUER` vs `TOKEN_ENDPOINT`:** The `EXPECTED_ISSUER` must match the `iss` claim in tokens — this is always the **external** URL (the OCP Route). The `TOKEN_ENDPOINT` is where the proxy sends the exchange request — use the **internal** service URL for reliability.
+> **`IDP_EXTERNAL_HOST`:** Set to the IdP's external route hostname (no `https://`, no port). The proxy uses this as the `Host` header on exchange calls so that exchanged tokens have the correct issuer URL (without `:8443`).
 
 > **`VERIFY_UPSTREAM_TLS: "false"`:** For POC/initial setup this is fine. For production, mount the IdP CA cert into the proxy pod and set this to `"true"`.
 
-### 10.3 Create the Secrets
+> **`PASSTHROUGH_PREFIXES`:** Default is `/admin,/js,/resources,/robots.txt`. These paths skip the exchange logic entirely. Adjust if the customer has specific paths that should never trigger exchange.
+
+### 10.4 Create the Secrets
 
 ```bash
 cat <<EOF | oc apply -f -
 apiVersion: v1
 kind: Secret
 metadata:
-  name: token-proxy-legacy-credentials
+  name: idp-proxy-rhsso-credentials
   namespace: sso-gateway
 type: Opaque
 stringData:
@@ -733,7 +755,7 @@ stringData:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: token-proxy-migrated-credentials
+  name: idp-proxy-rhbk-credentials
   namespace: sso-gateway
 type: Opaque
 stringData:
@@ -742,7 +764,7 @@ stringData:
 EOF
 ```
 
-### 10.4 Deploy the proxy
+### 10.5 Deploy the proxy
 
 Update the image reference in the deployment YAML to match the customer's registry, then apply:
 
@@ -754,18 +776,29 @@ IMAGE="image-registry.openshift-image-registry.svc:5000/sso-gateway/sso-token-ex
 IMAGE="${REGISTRY}/sso-gateway/sso-token-exchange-proxy:latest"
 
 # Apply the deployment (edit the image field first, or use sed)
-oc apply -f token-exchange-proxy/02-deployment.yaml
-oc apply -f token-exchange-proxy/03-service.yaml
+oc apply -f token-exchange-proxy/04-deployment.yaml
+oc apply -f token-exchange-proxy/05-service.yaml
 
 # If the image reference doesn't match, patch it:
-oc -n sso-gateway set image deployment/token-proxy-legacy proxy=${IMAGE}
-oc -n sso-gateway set image deployment/token-proxy-migrated proxy=${IMAGE}
+oc -n sso-gateway set image deployment/idp-proxy-rhsso proxy=${IMAGE}
+oc -n sso-gateway set image deployment/idp-proxy-rhbk proxy=${IMAGE}
 
 # Verify pods are running
 oc -n sso-gateway get pods
 ```
 
-### 10.5 Apply Network Policies
+### 10.6 Create Routes
+
+The OCP Routes for each IdP hostname must point to the proxy services:
+
+```bash
+oc apply -f token-exchange-proxy/06-route-rhsso.yaml
+oc apply -f token-exchange-proxy/07-route-rhbk.yaml
+```
+
+> **Important:** Edit the route YAMLs to use the customer's IdP hostnames. The routes use `edge` TLS termination. After applying, verify that the IdP admin consoles are accessible through the proxy routes.
+
+### 10.7 Apply Network Policies
 
 ```bash
 oc apply -f network-policy/network-policy.yaml
@@ -775,7 +808,7 @@ oc apply -f network-policy/network-policy.yaml
 
 ## Step 11: Integrate with the Customer's First Application
 
-This is where the solution connects to real applications. Let's say the customer is migrating **System A** from RH-SSO to RHBK.
+With the IdP Gateway Mode, the proxies are already deployed in front of each IdP — **no per-application proxy setup is needed**. This step is about migrating the first application and verifying the exchange works end-to-end.
 
 ### Scenario: System A migrates to RHBK, System B stays on RH-SSO
 
@@ -789,115 +822,74 @@ System B → (RH-SSO token) → System A (validates against RH-SSO) ✅
 System B → (RH-SSO token) → System A (now validates against RHBK) ❌ invalid_token
 ```
 
-**After migration with proxy:**
+**After migration with IdP Gateway Proxy:**
 
 ```
-                        ┌──────────────┐
-                        │   RH-SSO     │
-                        │   (IdP)      │
-                        └──────┬───────┘
-                               │
-                    ① Direct   │  Token response
-                    auth call  │  (RH-SSO token)
-                               │
-┌───────────┐                  │         ┌─────────┐        ┌───────────┐
-│  System B │──────────────────┘         │ Migrated │───────►│ System A  │
-│ (on RHSSO)│                            │  Proxy   │        │ (backend) │
-│           │──── ② API call ───────────►│          │        │ validates │
-│           │     (with RH-SSO token)    │ exchanges│        │ RHBK      │
-│           │                            │ to RHBK  │        │ tokens    │
-│           │◄─── ④ Response ────────────│ token    │◄── ③ ──│           │
-└───────────┘                            └──────────┘        └───────────┘
+┌───────────┐                                                 ┌───────────┐
+│  System B │  ① Auth (through idp-proxy-rhsso → RH-SSO)     │  System A │
+│ (on RHSSO)│──────────────────────────────────────────       │ (on RHBK) │
+│           │  Gets an RH-SSO token (pass-through,            │           │
+│           │  no exchange — no Bearer token involved)         │           │
+│           │                                                  │           │
+│           │  ② API call with RH-SSO token (direct)          │           │
+│           │─────────────────────────────────────────────────►│           │
+│           │                                                  │           │
+│           │      System A validates at RHBK (through idp-proxy-rhbk):   │
+│           │      ③ RHBK rejects RH-SSO token → 401                     │
+│           │      ④ Proxy exchanges → RHBK token                        │
+│           │      ⑤ Proxy retries → RHBK returns 200                    │
+│           │                                                  │           │
+│           │◄─────────────────── ⑥ Response ─────────────────│           │
+└───────────┘                                                 └───────────┘
 ```
 
-1. **System B authenticates directly against RH-SSO** — gets an RH-SSO token. The proxy is not involved.
-2. **System B calls System A's API** with the RH-SSO token. Networking is configured so this request hits the proxy (via a Kubernetes Service, Route, or ExternalName).
-3. **The proxy detects the issuer mismatch** (`iss` ≠ RHBK), exchanges the token for a RHBK token, and forwards the request to System A.
-4. **System A responds** to the proxy, which passes the response back to System B unchanged.
-
-The reverse direction works identically — if a RHBK-based system calls a legacy RH-SSO backend, the **legacy proxy** swaps the token the other way:
-
-```
-                        ┌──────────────┐
-                        │    RHBK      │
-                        │   (IdP)      │
-                        └──────┬───────┘
-                               │
-                    ① Direct   │  Token response
-                    auth call  │  (RHBK token)
-                               │
-┌───────────┐                  │         ┌─────────┐        ┌───────────┐
-│  System C │──────────────────┘         │  Legacy  │───────►│ System D  │
-│ (on RHBK) │                            │  Proxy   │        │ (backend) │
-│           │──── ② API call ───────────►│          │        │ validates │
-│           │     (with RHBK token)      │ exchanges│        │ RH-SSO   │
-│           │                            │ to RHSSO │        │ tokens    │
-│           │◄─── ④ Response ────────────│ token    │◄── ③ ──│           │
-└───────────┘                            └──────────┘        └───────────┘
-```
-
-> **Key point:** The proxy is a **reverse proxy** (man-in-the-middle), not a redirect. It holds the caller's HTTP connection open, makes a second call to the real backend, and streams the response back. The caller is completely unaware the proxy exists.
+1. **System B authenticates against RH-SSO** (through `idp-proxy-rhsso`). The proxy passes the login/token request through unchanged — no Bearer token, so no exchange logic triggers. System B gets an RH-SSO token.
+2. **System B calls System A's API** with the RH-SSO token. This is a direct call — the proxy is not in the app-to-app path.
+3. **System A validates the token at RHBK** (through `idp-proxy-rhbk`). RHBK rejects the foreign RH-SSO token with 401.
+4. **The proxy detects 401 + Bearer token**, exchanges the RH-SSO token for a RHBK token, and retries.
+5. **RHBK accepts the exchanged token** and returns the validation response.
+6. **System A responds** to System B. System B is completely unaware that a proxy was involved.
 
 ### What to do:
 
-1. **Create the migrated proxy's ConfigMap** (from Step 10.2) with:
-   - `TARGET_URL` pointing to System A's internal service
-   - `EXPECTED_ISSUER` set to the RHBK issuer URL
-   - `TOKEN_ENDPOINT` set to RHBK's internal token endpoint
-   - `IDP_ALIAS` = `rhsso` (the foreign issuer we're exchanging from)
-
-2. **Create an OCP Route or Service** that System B will call instead of System A directly:
-
+1. **Verify the proxies are running** (from Step 10):
 ```bash
-# Option A: Create a Route (if System B calls via external URL)
-cat <<EOF | oc apply -f -
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: system-a-proxy
-  namespace: sso-gateway
-spec:
-  host: system-a-proxy.${CLUSTER_DOMAIN}
-  tls:
-    termination: edge
-    insecureEdgeTerminationPolicy: Redirect
-  to:
-    kind: Service
-    name: token-proxy-migrated
-  port:
-    targetPort: 8080
-EOF
-
-# Option B: Create an ExternalName service in System B's namespace
-#           (if System B calls via internal service name)
-cat <<EOF | oc apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: system-a-api
-  namespace: <system-b-namespace>
-spec:
-  type: ExternalName
-  externalName: token-proxy-migrated.sso-gateway.svc.cluster.local
-  ports:
-    - port: 8080
-EOF
+oc -n sso-gateway get pods
+# Should see idp-proxy-rhsso and idp-proxy-rhbk pods running
 ```
 
-3. **Update System B's configuration** to call the proxy URL instead of System A's direct URL (this is a **config change**, not a code change — typically an environment variable or config file)
-
-4. **Migrate System A** to validate against RHBK (the application team does this)
-
-5. **Verify** by having System B call System A through the proxy — check the proxy logs:
-
+2. **Verify IdP access through the proxies:**
 ```bash
-oc -n sso-gateway logs -f deploy/token-proxy-migrated
-# Should see: "Issuer mismatch ... Exchanging token" → "Token exchanged successfully"
+# RH-SSO admin console should work through the proxy
+curl -sk "https://${RHSSO_ROUTE}/auth/admin/" -o /dev/null -w "%{http_code}"
+# Should return 200 (or 302 redirect to login)
+
+# RHBK admin console
+curl -sk "https://${RHBK_ROUTE}/admin/" -o /dev/null -w "%{http_code}"
 ```
 
-### Alternative: Sidecar Deployment
+3. **Migrate System A** to validate against RHBK (the application team does this)
 
-Instead of a standalone proxy deployment, inject the proxy as a sidecar in System A's pod. This avoids external routing changes entirely — System A's existing Service/Route stays the same, and the sidecar intercepts traffic locally.
+4. **Verify the exchange** by sending an RH-SSO token to RHBK through the proxy:
+
+```bash
+# Get an RH-SSO token
+RHSSO_TOKEN=$(curl -sk "${RHSSO_URL}/auth/realms/${REALM}/protocol/openid-connect/token" \
+  -d "client_id=token-exchange-client" -d "client_secret=<YOUR-SECRET>" \
+  -d "username=testuser" -d "password=testpass" \
+  -d "grant_type=password" -d "scope=openid" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Send it to RHBK's userinfo endpoint (through the proxy)
+curl -sk "https://${RHBK_ROUTE}/realms/${REALM}/protocol/openid-connect/userinfo" \
+  -H "Authorization: Bearer ${RHSSO_TOKEN}"
+# Should return user info (the proxy exchanged the token automatically)
+
+# Check the proxy logs
+oc -n sso-gateway logs deploy/idp-proxy-rhbk --tail=10
+# Should see: "IdP returned 401 ... Attempting token exchange" → "Token exchanged successfully — retrying request."
+```
+
+> **Key advantage of IdP Gateway Mode:** No application-level routing changes (Routes, ExternalName services) are needed. The proxy is transparent at the IdP level — all applications that validate tokens against the IdP automatically benefit.
 
 ---
 
@@ -934,10 +926,10 @@ usb-drive/
 │   │   ├── SSO-Migration-Implementation-Guide.md
 │   │   └── Offline-Deployment-Guide.md  ← (this file)
 │   ├── token-exchange-proxy/
-│   │   ├── 00-configmap.yaml   ← CUSTOMIZE per customer
-│   │   ├── 01-secret.yaml      ← CUSTOMIZE per customer
-│   │   ├── 02-deployment.yaml  ← UPDATE image reference
-│   │   └── 03-service.yaml
+│   │   ├── 02-configmap.yaml   ← CUSTOMIZE per customer
+│   │   ├── 03-secret.yaml      ← CUSTOMIZE per customer
+│   │   ├── 04-deployment.yaml  ← UPDATE image reference
+│   │   └── 05-service.yaml
 │   ├── network-policy/
 │   │   └── network-policy.yaml
 │   └── demo-app/
@@ -950,9 +942,11 @@ usb-drive/
 
 | File | What to Change |
 |------|----------------|
-| `token-exchange-proxy/00-configmap.yaml` | `TARGET_URL`, `EXPECTED_ISSUER`, `TOKEN_ENDPOINT` — all environment-specific |
-| `token-exchange-proxy/01-secret.yaml` | `EXCHANGE_CLIENT_SECRET` — use customer's generated secret |
-| `token-exchange-proxy/02-deployment.yaml` | `image` — point to customer's registry |
+| `token-exchange-proxy/02-configmap.yaml` | `TARGET_URL`, `TOKEN_ENDPOINT`, `IDP_EXTERNAL_HOST` — all environment-specific |
+| `token-exchange-proxy/03-secret.yaml` | `EXCHANGE_CLIENT_SECRET` — use customer's generated secret |
+| `token-exchange-proxy/04-deployment.yaml` | `image` — point to customer's registry |
+| `token-exchange-proxy/06-route-rhsso.yaml` | `spec.host` — set to customer's RH-SSO hostname |
+| `token-exchange-proxy/07-route-rhbk.yaml` | `spec.host` — set to customer's RHBK hostname |
 | `demo-app/k8s/deploy.yaml` | `image`, `CLIENT_SECRET`, `REALM` — match customer setup |
 
 ### Execution Order Cheat Sheet

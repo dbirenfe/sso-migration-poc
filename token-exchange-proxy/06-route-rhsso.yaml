@@ -1,22 +1,22 @@
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: sso-gateway-rhbk
+  name: idp-proxy-rhsso
   namespace: sso-gateway
   labels:
-    app: sso-gateway
+    app: idp-proxy-rhsso
     app.kubernetes.io/part-of: sso-migration
   annotations:
     haproxy.router.openshift.io/timeout: 60s
 spec:
-  host: rhbk-rhbk.apps.cluster-nf2q4.dynamic2.redhatworkshops.io
+  host: keycloak-rhsso.apps.cluster-nf2q4.dynamic2.redhatworkshops.io
   to:
     kind: Service
-    name: sso-gateway
+    name: idp-proxy-rhsso
     weight: 100
   port:
-    targetPort: https
+    targetPort: http
   tls:
-    termination: passthrough
+    termination: edge
     insecureEdgeTerminationPolicy: Redirect
   wildcardPolicy: None

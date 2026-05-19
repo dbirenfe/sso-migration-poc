@@ -6,4 +6,4 @@ metadata:
     app.kubernetes.io/part-of: sso-migration
     purpose: identity-routing
   annotations:
-    openshift.io/description: "API Gateway for parallel RH-SSO / RHBK identity routing"
+    openshift.io/description: "IdP Gateway Proxy for parallel RH-SSO / RHBK token exchange"
