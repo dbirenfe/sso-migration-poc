@@ -2,8 +2,6 @@
 
 *A zero-code-change approach to running two identity providers side by side during a gradual Keycloak migration.*
 
----
-
 ## The Problem
 
 A customer came to me with a migration challenge that's becoming increasingly common in the enterprise world: they needed to upgrade from **Red Hat Single Sign-On (RH-SSO) 7.6** to **Red Hat build of Keycloak (RHBK) 26.4**, but they couldn't do it all at once.
@@ -21,8 +19,6 @@ Here's the scenario they described:
 The customer had dozens of applications in this situation. They couldn't migrate everything simultaneously — the blast radius would be too large. They needed **gradual migration** with **zero code changes** to any application.
 
 The critical constraint: **they couldn't tell us which app uses which client or which IdP.** The teams that wrote the application code couldn't always provide this information. This constraint shaped our entire architecture.
-
----
 
 ## The Initial Solution: Bidirectional Token Exchange
 
@@ -49,7 +45,7 @@ POST /realms/myrealm/protocol/openid-connect/token
 
 The target IdP validates the foreign token against its configured IdP trust (checking signatures via JWKS), and if valid, issues a brand new native token.
 
-### The Feature Flag Minefield
+## The Feature Flag Minefield
 
 Getting the exchange to actually work required navigating a maze of feature flags:
 
@@ -82,8 +78,6 @@ The `:v1` suffix on `admin-fine-grained-authz` is critical — without it, the f
 
 And `token-exchange-external-internal` (a newer v2 feature) **must be disabled** — it overrides the fine-grained authorization model and breaks the exchange flow. We spent hours debugging "Token not authorized" errors before discovering this conflict.
 
----
-
 ## Evolution 1: The Transparent Proxy (In Front of Apps)
 
 With bidirectional exchange working, the next question was: **who performs the exchange?**
@@ -108,8 +102,6 @@ We deployed one proxy per protected app — `token-proxy-legacy` (in front of ap
 
 This worked in our POC environment where we controlled everything. But when we took it to the customer...
 
----
-
 ## The Customer's Curveball
 
 At the customer site, we hit the wall we mentioned earlier: **they couldn't map which app uses which client or IdP.** Deploying a proxy in front of each individual application was impractical because:
@@ -119,8 +111,6 @@ At the customer site, we hit the wall we mentioned earlier: **they couldn't map 
 3. The `EXPECTED_ISSUER` configuration required knowing which IdP each app validates against
 
 We needed a different approach — one that didn't require any per-app knowledge.
-
----
 
 ## Evolution 2: IdP Gateway Mode (In Front of the IdPs)
 
@@ -148,15 +138,15 @@ if upstream_resp.status_code in RETRY_STATUS_CODES and has_bearer:
 ```
 
 This is elegant because:
+
 - **No per-app configuration needed** — the proxy doesn't need to know anything about the applications
 - **No issuer pre-check needed** — the IdP itself tells us if the token is wrong (401)
 - **Pass-through for valid tokens** — if the token is already correct for this IdP, the first forward succeeds and no exchange happens
 - **Pass-through for non-Bearer requests** — token acquisition, login flows, admin console, OIDC discovery — all work untouched
 
-![IdP Gateway Proxy — Try/Exchange/Retry Flow](images/sso-migration-flow.png)
-*Flow 1: Valid token passes through untouched. Flow 2: Wrong-issuer token triggers automatic exchange and retry.*
+*[Insert image: sso-migration-flow.png — Flow 1: Valid token passes through untouched. Flow 2: Wrong-issuer token triggers automatic exchange and retry.]*
 
-### Deploying on OpenShift
+## Deploying on OpenShift
 
 On OpenShift, we took over the IdP routes. The original RH-SSO route in the `rhsso` namespace and the RHBK route in the `rhbk` namespace were replaced by proxy routes in the `sso-gateway` namespace:
 
@@ -186,11 +176,9 @@ spec:
 
 The proxy forwards to the IdP's **internal** Kubernetes service URL, while the route exposes the same **external** hostname. From every application's perspective, nothing changed — the same URL they always called now transparently handles cross-domain tokens.
 
----
-
 ## The Bugs That Almost Broke Everything
 
-### Bug 1: The `:8443` Issuer Problem
+## Bug 1: The :8443 Issuer Problem
 
 When the proxy exchanges a token at the IdP's internal service (port 8443), the resulting token's `iss` claim includes the port number:
 
@@ -216,7 +204,7 @@ def _exchange_headers():
     return headers
 ```
 
-### Bug 2: The Login Loop (Lost Set-Cookie Headers)
+## Bug 2: The Login Loop (Lost Set-Cookie Headers)
 
 After deploying the proxy, the Keycloak admin console went into an infinite login loop. Users could see the login page, enter credentials, but kept getting redirected back.
 
@@ -240,7 +228,7 @@ resp_headers = [
 
 This is a gotcha that anyone building a reverse proxy in Python should be aware of. The `requests` library is not designed for proxying — it's designed for being an HTTP client. For duplicate headers (especially `Set-Cookie`), you must go through `urllib3` directly.
 
-### Bug 3: TLS Trust Between IdPs
+## Bug 3: TLS Trust Between IdPs
 
 Each IdP needs to trust the other's TLS certificate for token validation (JWKS fetching, userinfo calls). On OpenShift, the certificates are often self-signed or internal CA-signed.
 
@@ -270,23 +258,18 @@ additionalOptions:
 
 Both methods survive pod restarts — the certificates are mounted from ConfigMaps, not manually imported.
 
----
-
 ## The Final Architecture
 
-![Complete Architecture on OpenShift](images/sso-migration-architecture.png)
-*The complete deployment: two IdP proxies in the sso-gateway namespace intercept all traffic to RH-SSO and RHBK.*
+*[Insert image: sso-migration-architecture.png — The complete deployment: two IdP proxies in the sso-gateway namespace intercept all traffic to RH-SSO and RHBK.]*
 
 The deployed solution consists of:
 
-| Component | Namespace | Purpose |
-|---|---|---|
-| RH-SSO 7.6.5 | `rhsso` | Legacy Identity Provider |
-| RHBK 26.4 | `rhbk` | New Identity Provider |
-| `idp-proxy-rhsso` | `sso-gateway` | Proxy in front of RH-SSO (exchanges RHBK tokens → RH-SSO) |
-| `idp-proxy-rhbk` | `sso-gateway` | Proxy in front of RHBK (exchanges RH-SSO tokens → RHBK) |
+- **RH-SSO 7.6.5** (namespace: `rhsso`) — Legacy Identity Provider
+- **RHBK 26.4** (namespace: `rhbk`) — New Identity Provider
+- **idp-proxy-rhsso** (namespace: `sso-gateway`) — Proxy in front of RH-SSO, exchanges RHBK tokens → RH-SSO
+- **idp-proxy-rhbk** (namespace: `sso-gateway`) — Proxy in front of RHBK, exchanges RH-SSO tokens → RHBK
 
-### How a request flows through the system
+## How a Request Flows Through the System
 
 **When the token is valid for the target IdP (no exchange needed):**
 
@@ -315,21 +298,15 @@ App → Proxy → IdP → 401 Unauthorized
 
 The app never knows the exchange happened. From its perspective, it sent a request and got a response — same as always.
 
----
-
 ## What We Proved
 
 We built an interactive demo application with 9 test scenarios, all passing:
 
-| # | Scenario | What it proves |
-|---|---|---|
-| 1-2 | Direct authentication (RH-SSO / RHBK) | Token acquisition works through the proxy (pass-through) |
-| 3-4 | Explicit token exchange (both directions) | Bidirectional trust is configured correctly |
-| 5-6 | Cross-domain Bearer token via proxy | The try/exchange/retry mechanism works transparently |
-| 7-8 | Multi-hop chained exchange | Tokens can be exchanged back and forth (RH-SSO→RHBK→RH-SSO) |
-| 9 | Full customer scenario | System B gets RH-SSO token, calls RHBK through proxy — works |
-
----
+- **Tests 1–2:** Direct authentication (RH-SSO / RHBK) — token acquisition works through the proxy (pass-through)
+- **Tests 3–4:** Explicit token exchange (both directions) — bidirectional trust is configured correctly
+- **Tests 5–6:** Cross-domain Bearer token via proxy — the try/exchange/retry mechanism works transparently
+- **Tests 7–8:** Multi-hop chained exchange — tokens can be exchanged back and forth (RH-SSO→RHBK→RH-SSO)
+- **Test 9:** Full customer scenario — System B gets RH-SSO token, calls RHBK through proxy — works
 
 ## Key Takeaways
 
@@ -345,8 +322,6 @@ We built an interactive demo application with 9 test scenarios, all passing:
 
 **6. The RHBK operator fights you for route ownership.** If you take over the RHBK route, set `spec.ingress.enabled: false` in the Keycloak CR or the operator will keep recreating its route.
 
----
-
 ## What's Next
 
 This architecture is proven for the POC. For production deployment, the key items are:
@@ -358,7 +333,5 @@ This architecture is proven for the POC. For production deployment, the key item
 - **Strong secrets** via HashiCorp Vault or External Secrets Operator
 
 The full source code, deployment manifests, interactive demo app, and detailed implementation guide are available in the repository.
-
----
 
 *This solution enables organizations to migrate from RH-SSO to RHBK at their own pace — one application at a time, with zero downtime and zero code changes. The proxy handles the complexity so your applications don't have to.*
