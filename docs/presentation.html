@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSO Migration — Token Exchange Proxy</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #161922;
+  --border: #2a2d3e;
+  --text: #e1e4ed;
+  --text2: #8b8fa3;
+  --accent: #4f8ff7;
+  --green: #34c759;
+  --red: #ff453a;
+  --orange: #ff9f0a;
+  --yellow: #ffd60a;
+  --rhsso: #ee0000;
+  --rhbk: #4f8ff7;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); }
+
+.deck { width: 100vw; height: 100vh; overflow: hidden; position: relative; }
+.slide { display: none; width: 100%; height: 100%; padding: 60px 80px; flex-direction: column; justify-content: center; position: absolute; top: 0; left: 0; }
+.slide.active { display: flex; }
+
+h1 { font-size: 36px; font-weight: 700; margin-bottom: 12px; }
+h2 { font-size: 28px; font-weight: 600; margin-bottom: 20px; color: var(--accent); }
+h3 { font-size: 20px; font-weight: 600; margin-bottom: 12px; color: var(--text); }
+p, li { font-size: 18px; line-height: 1.7; color: var(--text2); }
+li { margin-bottom: 8px; margin-left: 24px; }
+strong { color: var(--text); }
+code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 15px; color: var(--accent); font-family: 'Cascadia Code', 'Fira Code', monospace; }
+.subtitle { font-size: 20px; color: var(--text2); margin-bottom: 40px; }
+.spacer { height: 24px; }
+.small { font-size: 14px; color: var(--text2); }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; margin: 12px 0; }
+.card-title { font-size: 14px; font-weight: 600; color: var(--text2); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.grid { display: grid; gap: 20px; }
+.grid-2 { grid-template-columns: 1fr 1fr; }
+.grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+.stat { text-align: center; padding: 20px; }
+.stat-value { font-size: 42px; font-weight: 700; }
+.stat-label { font-size: 14px; color: var(--text2); margin-top: 4px; }
+.stat-green .stat-value { color: var(--green); }
+.stat-accent .stat-value { color: var(--accent); }
+
+.callout { border-left: 3px solid var(--accent); padding: 16px 20px; background: rgba(79,143,247,0.06); border-radius: 0 8px 8px 0; margin: 16px 0; }
+.callout-warn { border-left-color: var(--orange); background: rgba(255,159,10,0.06); }
+.callout-danger { border-left-color: var(--red); background: rgba(255,69,58,0.06); }
+.callout-success { border-left-color: var(--green); background: rgba(52,199,89,0.06); }
+.callout strong { display: block; margin-bottom: 4px; }
+
+.mono { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 15px; line-height: 1.8; background: var(--surface); padding: 16px 20px; border-radius: 8px; border: 1px solid var(--border); color: var(--text2); white-space: pre; overflow-x: auto; margin: 12px 0; }
+
+.pill { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; background: var(--surface); border: 1px solid var(--border); color: var(--text2); margin-right: 6px; }
+.pill-active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.pill-red { border-color: var(--rhsso); color: var(--rhsso); }
+.pill-blue { border-color: var(--rhbk); color: var(--rhbk); }
+
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 15px; }
+th { text-align: left; padding: 10px 16px; background: var(--surface); color: var(--text2); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+td { padding: 10px 16px; border-bottom: 1px solid var(--border); color: var(--text2); }
+tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+
+.nav { position: fixed; bottom: 24px; right: 32px; display: flex; gap: 8px; z-index: 100; }
+.nav button { padding: 8px 20px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 14px; cursor: pointer; font-family: inherit; }
+.nav button:hover { background: var(--accent); border-color: var(--accent); }
+.nav button:disabled { opacity: 0.3; cursor: default; }
+.nav button:disabled:hover { background: var(--surface); }
+.slide-counter { position: fixed; bottom: 28px; left: 32px; font-size: 13px; color: var(--text2); z-index: 100; }
+
+.center { text-align: center; }
+.flow-arrow { color: var(--accent); font-size: 20px; margin: 0 8px; }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+<!-- SLIDE 1: Title -->
+<div class="slide center">
+  <h1>Transparent Token Exchange Proxy</h1>
+  <p class="subtitle">Parallel RH-SSO / RHBK Migration on OpenShift</p>
+  <div class="spacer"></div>
+  <div class="grid grid-3" style="max-width:600px;margin:0 auto">
+    <div class="stat stat-green"><div class="stat-value">0</div><div class="stat-label">Code Changes</div></div>
+    <div class="stat stat-green"><div class="stat-value">9/9</div><div class="stat-label">Tests Passing</div></div>
+    <div class="stat stat-accent"><div class="stat-value">~75m</div><div class="stat-label">Deploy Time</div></div>
+  </div>
+  <div class="spacer"></div>
+  <p class="small">Zero-code-change approach to running two identity providers side by side during a gradual Keycloak migration.</p>
+</div>
+
+<!-- SLIDE 2: Problem -->
+<div class="slide">
+  <h2>The Problem</h2>
+  <p>Customer migrating from <strong>RH-SSO 7.6</strong> to <strong>RHBK 26.4</strong> — but can't do it all at once.</p>
+  <div class="card">
+    <div class="card-title">The Scenario</div>
+    <ul>
+      <li><strong>System A</strong> has a client on RH-SSO. Users authenticate through it.</li>
+      <li><strong>System B</strong> has no client — uses System A's client to get tokens and pull data.</li>
+      <li>After migrating System A to RHBK, System B's RH-SSO tokens become <strong>invalid</strong>.</li>
+    </ul>
+  </div>
+  <div class="callout callout-warn">
+    <strong>Critical Constraint</strong>
+    <p>The customer can't tell us which app uses which client or which IdP.</p>
+  </div>
+  <p><strong>Requirements:</strong> gradual migration, zero code changes, no per-app mapping.</p>
+</div>
+
+<!-- SLIDE 3: Foundation -->
+<div class="slide">
+  <h2>Foundation: Bidirectional Token Exchange</h2>
+  <p>RFC 8693 — one IdP validates a foreign token and issues a native token in return.</p>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title"><span class="pill pill-red">RH-SSO 7.6</span> Configuration</div>
+      <ul>
+        <li>IdP alias: <code>rhbk</code></li>
+        <li>Client: <code>token-exchange-client</code></li>
+        <li>Features: <code>token_exchange</code> + <code>admin_fine_grained_authz</code></li>
+      </ul>
+      <p class="small">Both are tech-preview, enabled via JAVA_OPTS_APPEND</p>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="pill pill-blue">RHBK 26.4</span> Configuration</div>
+      <ul>
+        <li>IdP alias: <code>rhsso</code></li>
+        <li>Client: <code>token-exchange-client</code></li>
+        <li>Features: <code>preview</code> + <code>admin-fine-grained-authz:v1</code></li>
+      </ul>
+      <p class="small">Must disable <code>token-exchange-external-internal</code> (v2 conflicts)</p>
+    </div>
+  </div>
+  <div class="callout">
+    <strong>Key Gotcha</strong>
+    <p>The <code>:v1</code> suffix on admin-fine-grained-authz is critical — without it, the feature silently fails.</p>
+  </div>
+</div>
+
+<!-- SLIDE 4: Evolution 1 -->
+<div class="slide">
+  <h2>Evolution 1: Proxy in Front of Apps</h2>
+  <p>Built a transparent Python reverse proxy between callers and backend services.</p>
+  <div class="card">
+    <div class="card-title">How It Worked</div>
+    <ul>
+      <li>Configure <code>EXPECTED_ISSUER</code> — the issuer the backend expects</li>
+      <li>Decode the Bearer token's <code>iss</code> claim</li>
+      <li>If issuer doesn't match → exchange the token</li>
+      <li>Forward with the new token</li>
+    </ul>
+  </div>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">token-proxy-legacy</div>
+      <p>In front of RH-SSO apps. Exchanges RHBK → RH-SSO tokens.</p>
+    </div>
+    <div class="card">
+      <div class="card-title">token-proxy-migrated</div>
+      <p>In front of RHBK apps. Exchanges RH-SSO → RHBK tokens.</p>
+    </div>
+  </div>
+  <div class="callout callout-success"><p>Worked in our POC. But at the customer site...</p></div>
+</div>
+
+<!-- SLIDE 5: Curveball -->
+<div class="slide">
+  <h2>The Customer's Curveball</h2>
+  <div class="callout callout-danger">
+    <strong>Blocker: They couldn't map which app uses which client or IdP.</strong>
+  </div>
+  <div class="spacer"></div>
+  <ul>
+    <li>Dozens of apps across multiple namespaces</li>
+    <li>App teams couldn't tell us which SSO client their app used</li>
+    <li><code>EXPECTED_ISSUER</code> required knowing which IdP each app validates against</li>
+  </ul>
+  <div class="spacer"></div>
+  <h3>We needed an approach that requires zero per-app knowledge.</h3>
+</div>
+
+<!-- SLIDE 6: Evolution 2 -->
+<div class="slide">
+  <h2>Evolution 2: IdP Gateway Mode</h2>
+  <h3 style="color:var(--accent)">Breakthrough: proxy the IdPs themselves, not the apps.</h3>
+  <p>One proxy in front of RH-SSO, one in front of RHBK. All traffic flows through.</p>
+  <div class="card">
+    <div class="card-title">Try-First, Exchange-on-Failure</div>
+    <ol>
+      <li>Forward the request to the IdP <strong>as-is</strong></li>
+      <li>If IdP returns <strong>401/403</strong> AND request has Bearer token → <strong>exchange</strong></li>
+      <li><strong>Retry</strong> with the exchanged token</li>
+      <li>If retry also fails → token is genuinely invalid</li>
+    </ol>
+  </div>
+  <div class="grid grid-2">
+    <div class="callout callout-success"><p><strong>No per-app config</strong> — proxy knows nothing about apps</p></div>
+    <div class="callout callout-success"><p><strong>No issuer check</strong> — the IdP tells us via 401</p></div>
+  </div>
+</div>
+
+<!-- SLIDE 7: Flow -->
+<div class="slide">
+  <h2>How Requests Flow</h2>
+  <div class="card">
+    <div class="card-title"><span class="pill pill-active" style="background:var(--green);border-color:var(--green)">Pass-through</span> Valid Token</div>
+    <div class="mono">App → Proxy → IdP → 200 OK → Proxy → App</div>
+    <p class="small">No exchange needed. Sub-millisecond overhead.</p>
+  </div>
+  <div class="card">
+    <div class="card-title"><span class="pill pill-active" style="background:var(--orange);border-color:var(--orange)">Exchange</span> Wrong-IdP Token</div>
+    <div class="mono">App → Proxy → IdP → 401
+    ↓ Proxy catches 401 + Bearer
+    ↓ Exchange token at IdP
+    ↓ Retry with new token
+    IdP → 200 OK → Proxy → App</div>
+    <p class="small">App never knows. 20-100ms overhead (cached after first exchange).</p>
+  </div>
+</div>
+
+<!-- SLIDE 8: Architecture -->
+<div class="slide">
+  <h2>Architecture on OpenShift</h2>
+  <table>
+    <tr><th>Component</th><th>Namespace</th><th>Purpose</th></tr>
+    <tr><td><strong>RH-SSO 7.6.5</strong></td><td><code>rhsso</code></td><td>Legacy Identity Provider</td></tr>
+    <tr><td><strong>RHBK 26.4</strong></td><td><code>rhbk</code></td><td>New Identity Provider</td></tr>
+    <tr><td><strong>idp-proxy-rhsso</strong></td><td><code>sso-gateway</code></td><td>Proxy in front of RH-SSO</td></tr>
+    <tr><td><strong>idp-proxy-rhbk</strong></td><td><code>sso-gateway</code></td><td>Proxy in front of RHBK</td></tr>
+  </table>
+  <div class="spacer"></div>
+  <h3>Key Deployment Details</h3>
+  <ul>
+    <li>Proxy routes take over IdP hostnames (edge TLS termination)</li>
+    <li>RHBK operator ingress disabled: <code>spec.ingress.enabled: false</code></li>
+    <li>TLS trust via ConfigMap-mounted certificates (survives restarts)</li>
+    <li><code>IDP_EXTERNAL_HOST</code> ensures correct issuer (no :8443)</li>
+  </ul>
+</div>
+
+<!-- SLIDE 9: Bugs -->
+<div class="slide">
+  <h2>Bugs That Almost Broke Everything</h2>
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-title">Bug 1: :8443 Issuer</div>
+      <p>Internal calls produced tokens with <code>:8443</code> in the issuer. Fixed with <code>IDP_EXTERNAL_HOST</code> — sets Host header on exchange calls.</p>
+    </div>
+    <div class="card">
+      <div class="card-title">Bug 2: Login Loop</div>
+      <p>Python <code>requests</code> merges duplicate <code>Set-Cookie</code> headers. Fixed by using <code>raw.headers</code> from urllib3.</p>
+    </div>
+    <div class="card">
+      <div class="card-title">Bug 3: TLS Trust</div>
+      <p>IdPs couldn't validate each other's certs. Fixed with ConfigMap-mounted certs + <code>X509_CA_BUNDLE</code> / <code>truststore-paths</code>.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <strong>Lesson Learned</strong>
+    <p>Python's <code>requests</code> library is not designed for proxying — it's an HTTP client. For faithful proxying, use urllib3's raw headers.</p>
+  </div>
+</div>
+
+<!-- SLIDE 10: Demo -->
+<div class="slide center">
+  <h2>Live Demo</h2>
+  <p style="font-size:20px;margin-bottom:24px">9 test scenarios — all passing</p>
+  <table style="max-width:700px;margin:0 auto">
+    <tr><th>#</th><th>Scenario</th><th>Proves</th></tr>
+    <tr><td>1-2</td><td>Direct auth (RH-SSO / RHBK)</td><td>Pass-through works</td></tr>
+    <tr><td>3-4</td><td>Explicit exchange (both directions)</td><td>Bidirectional trust OK</td></tr>
+    <tr><td>5-6</td><td>Cross-domain Bearer via proxy</td><td>Try/exchange/retry works</td></tr>
+    <tr><td>7-8</td><td>Multi-hop chained</td><td>RH-SSO→RHBK→RH-SSO</td></tr>
+    <tr><td>9</td><td>Full customer scenario</td><td>End-to-end migration flow</td></tr>
+  </table>
+  <div class="spacer"></div>
+  <div class="callout callout-success center"><strong>Let's switch to the live demo...</strong></div>
+</div>
+
+<!-- SLIDE 11: Summary -->
+<div class="slide">
+  <h2>Key Takeaways</h2>
+  <ol>
+    <li><strong>"Try first, exchange on failure"</strong> — more robust than issuer pre-checking, zero per-app config</li>
+    <li><strong><code>token-exchange-external-internal</code> v2 conflicts with v1</strong> — disable v2</li>
+    <li><strong>Python <code>requests</code> is not a proxy</strong> — use <code>raw.headers</code> for Set-Cookie</li>
+    <li><strong>Internal URLs = wrong issuer port</strong> — set <code>IDP_EXTERNAL_HOST</code></li>
+    <li><strong>RHBK operator recreates routes</strong> — disable with <code>ingress.enabled: false</code></li>
+  </ol>
+  <div class="spacer"></div>
+  <h3>For Production</h3>
+  <div class="grid grid-2">
+    <ul>
+      <li>Custom RHBK image (bake in features)</li>
+      <li>TLS verification enabled</li>
+      <li>Redis-backed token cache</li>
+    </ul>
+    <ul>
+      <li>Prometheus metrics + alerts</li>
+      <li>Secrets via Vault</li>
+      <li>CI/CD for proxy image</li>
+    </ul>
+  </div>
+  <div class="spacer"></div>
+  <div class="callout callout-success center">
+    <strong>Migrate RH-SSO to RHBK at your own pace — one app at a time, zero downtime, zero code changes.</strong>
+  </div>
+</div>
+
+</div>
+
+<!-- Navigation -->
+<div class="slide-counter"><span id="counter">1 / 11</span></div>
+<div class="nav">
+  <button id="prev" onclick="go(-1)">← Previous</button>
+  <button id="next" onclick="go(1)">Next →</button>
+</div>
+
+<script>
+let current = 0;
+const slides = document.querySelectorAll('.slide');
+const total = slides.length;
+
+function show(idx) {
+  slides.forEach((s, i) => s.classList.toggle('active', i === idx));
+  document.getElementById('counter').textContent = (idx + 1) + ' / ' + total;
+  document.getElementById('prev').disabled = idx === 0;
+  document.getElementById('next').disabled = idx === total - 1;
+}
+
+function go(dir) {
+  current = Math.max(0, Math.min(total - 1, current + dir));
+  show(current);
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); go(1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); go(-1); }
+});
+
+show(0);
+</script>
+</body>
+</html>
