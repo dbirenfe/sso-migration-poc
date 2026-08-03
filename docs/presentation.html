@@ -246,30 +246,7 @@ tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
   </ul>
 </div>
 
-<!-- SLIDE 9: Bugs -->
-<div class="slide">
-  <h2>Bugs That Almost Broke Everything</h2>
-  <div class="grid grid-3">
-    <div class="card">
-      <div class="card-title">Bug 1: :8443 Issuer</div>
-      <p>Internal calls produced tokens with <code>:8443</code> in the issuer. Fixed with <code>IDP_EXTERNAL_HOST</code> — sets Host header on exchange calls.</p>
-    </div>
-    <div class="card">
-      <div class="card-title">Bug 2: Login Loop</div>
-      <p>Python <code>requests</code> merges duplicate <code>Set-Cookie</code> headers. Fixed by using <code>raw.headers</code> from urllib3.</p>
-    </div>
-    <div class="card">
-      <div class="card-title">Bug 3: TLS Trust</div>
-      <p>IdPs couldn't validate each other's certs. Fixed with ConfigMap-mounted certs + <code>X509_CA_BUNDLE</code> / <code>truststore-paths</code>.</p>
-    </div>
-  </div>
-  <div class="callout">
-    <strong>Lesson Learned</strong>
-    <p>Python's <code>requests</code> library is not designed for proxying — it's an HTTP client. For faithful proxying, use urllib3's raw headers.</p>
-  </div>
-</div>
-
-<!-- SLIDE 10: Demo -->
+<!-- SLIDE 9: Demo -->
 <div class="slide center">
   <h2>Live Demo</h2>
   <p style="font-size:20px;margin-bottom:24px">9 test scenarios — all passing</p>
@@ -318,7 +295,7 @@ tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
 </div>
 
 <!-- Navigation -->
-<div class="slide-counter"><span id="counter">1 / 11</span></div>
+<div class="slide-counter"><span id="counter">1 / 10</span></div>
 <div class="nav">
   <button id="prev" onclick="go(-1)">← Previous</button>
   <button id="next" onclick="go(1)">Next →</button>
